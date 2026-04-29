@@ -26,12 +26,8 @@
 static HWND g_hwnd = NULL;
 static NOTIFYICONDATAA g_nid = {0};
 static int g_volume = -1;
-static BOOL g_running = TRUE;
 
-/* --- FIX #1: TaskbarCreated message --- */
 static UINT WM_TASKBARCREATED;
-
-/* --- FIX #2: persistent icon handle --- */
 static HICON g_hIcon = NULL;
 
 /* ───────────────── SOAP ───────────────── */
@@ -123,7 +119,12 @@ static int get_volume(void)
     if (!end) return -1;
 
     char buf[16] = {0};
-    memcpy(buf, p, end - p);
+    int len = (int)(end - p);
+    if (len <= 0) return -1;
+    if (len >= (int)sizeof(buf)) len = sizeof(buf) - 1;
+
+    memcpy(buf, p, len);
+    buf[len] = '\0';
 
     return atoi(buf);
 }
@@ -157,51 +158,51 @@ static BOOL set_volume(int vol)
 
 typedef struct {
     int r, g, b;
-} RGB;
+} Color;
 
-static RGB lerp(RGB a, RGB b, float t)
+static inline Color lerp_color(Color a, Color b, float t)
 {
-    RGB c;
+    Color c;
     c.r = a.r + (int)((b.r - a.r) * t);
     c.g = a.g + (int)((b.g - a.g) * t);
     c.b = a.b + (int)((b.b - a.b) * t);
     return c;
 }
 
-static RGB volume_to_color(int vol)
+static Color volume_to_color(int vol)
 {
-    RGB light_blue = {120, 200, 255};
-    RGB blue       = {0, 90, 255};
-    RGB green      = {0, 220, 80};
-    RGB yellow     = {255, 220, 0};
-    RGB orange     = {255, 140, 0};
-    RGB red        = {220, 40, 40};
+    Color light_blue = {120, 200, 255};
+    Color blue       = {0, 90, 255};
+    Color green      = {0, 220, 80};
+    Color yellow     = {255, 220, 0};
+    Color orange     = {255, 140, 0};
+    Color red        = {220, 40, 40};
 
     float t;
-    RGB c;
+    Color c;
 
     if (vol < 0)
-        return (RGB){80, 80, 80};
+        return (Color){80, 80, 80};
 
     if (vol <= 20) {
         t = vol / 20.0f;
-        c = lerp(light_blue, blue, t);
+        c = lerp_color(light_blue, blue, t);
     }
     else if (vol <= 40) {
         t = (vol - 20) / 20.0f;
-        c = lerp(blue, green, t);
+        c = lerp_color(blue, green, t);
     }
     else if (vol <= 60) {
         t = (vol - 40) / 20.0f;
-        c = lerp(green, yellow, t);
+        c = lerp_color(green, yellow, t);
     }
     else if (vol <= 80) {
         t = (vol - 60) / 20.0f;
-        c = lerp(yellow, orange, t);
+        c = lerp_color(yellow, orange, t);
     }
     else {
         t = (vol - 80) / 20.0f;
-        c = lerp(orange, red, t);
+        c = lerp_color(orange, red, t);
     }
 
     return c;
@@ -211,18 +212,17 @@ static HICON create_icon(int vol)
 {
     int sz = 16;
 
-    RGB col = volume_to_color(vol);
+    Color col = volume_to_color(vol);
 
     HDC hdc = GetDC(NULL);
-
     HDC mem = CreateCompatibleDC(hdc);
 
     HBITMAP color = CreateCompatibleBitmap(hdc, sz, sz);
-    HBITMAP mask  = CreateBitmap(sz, sz, 1, 1, NULL); // ✔ ВАЖНО
+    HBITMAP mask  = CreateBitmap(sz, sz, 1, 1, NULL);
 
     HBITMAP old = (HBITMAP)SelectObject(mem, color);
 
-    RECT rc = {0,0,sz,sz};
+    RECT rc = {0, 0, sz, sz};
 
     HBRUSH br = CreateSolidBrush(RGB(col.r, col.g, col.b));
     FillRect(mem, &rc, br);
@@ -233,17 +233,25 @@ static HICON create_icon(int vol)
     else sprintf(txt, "%d", vol);
 
     SetBkMode(mem, TRANSPARENT);
-    SetTextColor(mem, RGB(255,255,255));
+
+    /* Perceived brightness (Rec. 601 luma, max = 255*59 = 15045) */
+    int brightness = col.r * 30 + col.g * 59 + col.b * 11;
+    float t = brightness / 15045.0f;
+    if (t > 1.0f) t = 1.0f;
+    if (t < 0.0f) t = 0.0f;
+    t = 1.0f - t;  /* invert: bright bg → dark text */
+    int gray = (int)(180 * t + 40);
+    SetTextColor(mem, RGB(gray, gray, gray));
+
     DrawTextA(mem, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(mem, old);
 
     ICONINFO ii;
     ZeroMemory(&ii, sizeof(ii));
-
-    ii.fIcon = TRUE;
+    ii.fIcon    = TRUE;
     ii.hbmColor = color;
-    ii.hbmMask = mask;   // ✔ ВАЖНО (исправляет прозрачность)
+    ii.hbmMask  = mask;
 
     HICON icon = CreateIconIndirect(&ii);
 
@@ -255,11 +263,16 @@ static HICON create_icon(int vol)
     return icon;
 }
 
-/* --- FIX #2: persistent icon --- */
+/* ───────── tray helpers ───────── */
+
 static void update_tray_icon(void)
 {
-    if (g_hIcon) DestroyIcon(g_hIcon);
-    g_hIcon = create_icon(g_volume);
+    HICON new_icon = create_icon(g_volume);
+    if (new_icon) {
+        if (g_hIcon) DestroyIcon(g_hIcon);
+        g_hIcon = new_icon;
+    }
+    /* if create_icon failed, keep showing the old icon */
 
     g_nid.hIcon = g_hIcon;
 
@@ -271,17 +284,14 @@ static void update_tray_icon(void)
     Shell_NotifyIconA(NIM_MODIFY, &g_nid);
 }
 
-/* --- FIX #3: retry + version --- */
 static void add_tray_icon(void)
 {
     int tries = 5;
-
     while (tries--) {
         if (Shell_NotifyIconA(NIM_ADD, &g_nid))
             break;
         Sleep(200);
     }
-
     g_nid.uVersion = NOTIFYICON_VERSION;
     Shell_NotifyIconA(NIM_SETVERSION, &g_nid);
 }
@@ -299,17 +309,21 @@ static void adjust(int d)
         g_volume = get_volume();
 
     int v = g_volume + d;
+    if (v < VOL_MIN) v = VOL_MIN;
+    if (v > VOL_MAX) v = VOL_MAX;
 
-    if (set_volume(v)) {
+    if (set_volume(v))
         g_volume = v;
-        update_tray_icon();
-    }
+    else
+        g_volume = -1;
+
+    update_tray_icon();
 }
 
 /* ───────── window proc ───────── */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
-                                WPARAM wp, LPARAM lp)
+                                 WPARAM wp, LPARAM lp)
 {
     if (msg == WM_TASKBARCREATED) {
         add_tray_icon();
@@ -322,16 +336,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
     case WM_CREATE:
         RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C);
         RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D);
-
         SetTimer(hwnd, TIMER_REFRESH, REFRESH_MS, NULL);
 
         g_volume = get_volume();
 
         memset(&g_nid, 0, sizeof(g_nid));
-        g_nid.cbSize = sizeof(g_nid);
-        g_nid.hWnd = hwnd;
-        g_nid.uID = 1;
-        g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        g_nid.cbSize           = sizeof(g_nid);
+        g_nid.hWnd             = hwnd;
+        g_nid.uID              = 1;
+        g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         g_nid.uCallbackMessage = WM_TRAY_ICON;
 
         add_tray_icon();
@@ -343,14 +356,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
         if (wp == HOTKEY_VOL_UP) adjust(+1);
         return 0;
 
-    case WM_TIMER:
-        g_volume = get_volume();
-        update_tray_icon();
+    case WM_TIMER: {
+        int v = get_volume();
+        if (v >= 0 && v != g_volume) {
+            g_volume = v;
+            update_tray_icon();
+        }
         return 0;
+    }
 
     case WM_TRAY_ICON:
-        if (LOWORD(lp) == WM_RBUTTONUP)
-        {
+        if (LOWORD(lp) == WM_RBUTTONUP) {
             POINT pt;
             GetCursorPos(&pt);
 
@@ -360,11 +376,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
             AppendMenuA(menu, MF_STRING, IDM_EXIT, "Exit");
 
             SetForegroundWindow(hwnd);
-
-            TrackPopupMenu(menu,
-                TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
-                pt.x, pt.y, 0, hwnd, NULL);
-
+            TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+                           pt.x, pt.y, 0, hwnd, NULL);
             DestroyMenu(menu);
 
             PostMessage(hwnd, WM_NULL, 0, 0);
@@ -372,12 +385,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
         return 0;
 
     case WM_COMMAND:
-        switch (LOWORD(wp))
-        {
+        switch (LOWORD(wp)) {
         case IDM_EXIT:
             DestroyWindow(hwnd);
             return 0;
-
         case IDM_GET_VOL:
             g_volume = get_volume();
             update_tray_icon();
@@ -389,12 +400,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
         KillTimer(hwnd, TIMER_REFRESH);
         UnregisterHotKey(hwnd, HOTKEY_VOL_DN);
         UnregisterHotKey(hwnd, HOTKEY_VOL_UP);
-
         remove_tray_icon();
-
-        if (g_hIcon)
-            DestroyIcon(g_hIcon);
-
+        if (g_hIcon) DestroyIcon(g_hIcon);
         PostQuitMessage(0);
         return 0;
     }
@@ -407,18 +414,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
                    LPSTR lpCmd, int nShow)
 {
+    HANDLE mutex = CreateMutexA(NULL, TRUE, "ReceiverTrayMutex_v1");
+    if (!mutex) return 0;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutex);
+        return 0;
+    }
+
     WM_TASKBARCREATED = RegisterWindowMessageA("TaskbarCreated");
 
     WNDCLASSA wc = {0};
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInst;
+    wc.lpfnWndProc   = WndProc;
+    wc.hInstance     = hInst;
     wc.lpszClassName = "TrayApp";
-
     RegisterClassA(&wc);
 
     g_hwnd = CreateWindowA("TrayApp", "", 0,
-                           0,0,0,0,
-                           NULL,NULL,hInst,NULL);
+                           0, 0, 0, 0,
+                           NULL, NULL, hInst, NULL);
+    if (!g_hwnd) {
+        ReleaseMutex(mutex);
+        CloseHandle(mutex);
+        return 0;
+    }
 
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0)) {
@@ -426,5 +444,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev,
         DispatchMessageA(&msg);
     }
 
+    ReleaseMutex(mutex);
+    CloseHandle(mutex);
     return 0;
 }
