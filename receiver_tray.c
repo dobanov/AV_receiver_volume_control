@@ -46,8 +46,9 @@ static BOOL soap_request(const char *action, const char *body_xml,
                              NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
     if (!hConn) goto done;
 
+    /* HTTP/1.0 */
     hReq = HttpOpenRequestA(hConn, "POST", CONTROL_URL,
-                            "HTTP/1.1", NULL, NULL,
+                            "HTTP/1.0", NULL, NULL,
                             INTERNET_FLAG_NO_CACHE_WRITE |
                             INTERNET_FLAG_RELOAD, 0);
     if (!hReq) goto done;
@@ -55,7 +56,8 @@ static BOOL soap_request(const char *action, const char *body_xml,
     char headers[512];
     snprintf(headers, sizeof(headers),
              "Content-Type: text/xml; charset=utf-8\r\n"
-             "SOAPAction: \"%s\"\r\n",
+             "SOAPAction: \"%s\"\r\n"
+             "Connection: close\r\n",
              action);
 
     DWORD body_len = (DWORD)strlen(body_xml);
@@ -73,9 +75,13 @@ static BOOL soap_request(const char *action, const char *body_xml,
                                   resp_buf + total,
                                   resp_size - total - 1, &read))
                 break;
-            if (read == 0) break;
+
+            if (read == 0)
+                break;
+
             total += read;
         }
+
         resp_buf[total] = '\0';
     }
 
@@ -93,13 +99,13 @@ done:
 static int get_volume(void)
 {
     const char *action =
-        "urn:schemas-upnp-org:service:RenderingControl:2#GetVolume";
+        "urn:schemas-upnp-org:service:RenderingControl:1#GetVolume";
 
     const char *body =
         "<?xml version=\"1.0\"?>"
         "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">"
         "<s:Body>"
-        "<u:GetVolume xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:2\">"
+        "<u:GetVolume xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">"
         "<InstanceID>0</InstanceID>"
         "<Channel>Master</Channel>"
         "</u:GetVolume>"
@@ -115,13 +121,19 @@ static int get_volume(void)
     if (!p) return -1;
 
     p += 15;
+
     char *end = strchr(p, '<');
     if (!end) return -1;
 
     char buf[16] = {0};
+
     int len = (int)(end - p);
-    if (len <= 0) return -1;
-    if (len >= (int)sizeof(buf)) len = sizeof(buf) - 1;
+
+    if (len <= 0)
+        return -1;
+
+    if (len >= (int)sizeof(buf))
+        len = sizeof(buf) - 1;
 
     memcpy(buf, p, len);
     buf[len] = '\0';
@@ -135,14 +147,15 @@ static BOOL set_volume(int vol)
     if (vol > VOL_MAX) vol = VOL_MAX;
 
     const char *action =
-        "urn:schemas-upnp-org:service:RenderingControl:2#SetVolume";
+        "urn:schemas-upnp-org:service:RenderingControl:1#SetVolume";
 
     char body[1024];
+
     snprintf(body, sizeof(body),
         "<?xml version=\"1.0\"?>"
         "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">"
         "<s:Body>"
-        "<u:SetVolume xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:2\">"
+        "<u:SetVolume xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">"
         "<InstanceID>0</InstanceID>"
         "<Channel>Master</Channel>"
         "<DesiredVolume>%d</DesiredVolume>"
