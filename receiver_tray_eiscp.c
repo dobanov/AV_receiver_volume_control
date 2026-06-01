@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <ctype.h>
+#include <string.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -35,6 +36,22 @@ typedef enum {
 } RecvState;
 
 /* ------------------------------------------------------------------ */
+/*  Global shutdown flag                                               */
+/* ------------------------------------------------------------------ */
+
+static volatile LONG g_shutting_down = 0;
+
+static int is_shutting_down(void)
+{
+    return InterlockedCompareExchange(&g_shutting_down, 0, 0) != 0;
+}
+
+static void begin_shutdown(void)
+{
+    InterlockedExchange(&g_shutting_down, 1);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Command queue                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -50,11 +67,12 @@ static int              g_cmd_tail = 0;
 
 static void enqueue_cmd(const char *cmd)
 {
+    if (is_shutting_down()) return;
+
     EnterCriticalSection(&g_cmd_cs);
     int next = (g_cmd_tail + 1) % CMD_QUEUE;
     if (next != g_cmd_head) {
-        strncpy(g_cmd_buf[g_cmd_tail].cmd, cmd, CMD_MAXLEN - 1);
-        g_cmd_buf[g_cmd_tail].cmd[CMD_MAXLEN - 1] = 0;
+        strncpy_s(g_cmd_buf[g_cmd_tail].cmd, CMD_MAXLEN, cmd, _TRUNCATE);
         g_cmd_tail = next;
     } else {
         OutputDebugStringA("pioneer_tray: command queue overflow\n");
@@ -64,30 +82,26 @@ static void enqueue_cmd(const char *cmd)
 
 static int dequeue_cmd(char *out)
 {
+    int ok = 0;
+
     EnterCriticalSection(&g_cmd_cs);
-    int ok = (g_cmd_head != g_cmd_tail);
-    if (ok) {
-        strncpy(out, g_cmd_buf[g_cmd_head].cmd, CMD_MAXLEN);
-        out[CMD_MAXLEN - 1] = 0;
+    if (g_cmd_head != g_cmd_tail) {
+        strncpy_s(out, CMD_MAXLEN, g_cmd_buf[g_cmd_head].cmd, _TRUNCATE);
         g_cmd_head = (g_cmd_head + 1) % CMD_QUEUE;
+        ok = 1;
     }
     LeaveCriticalSection(&g_cmd_cs);
+
     return ok;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Shutdown socket                                                    */
-/*                                                                     */
-/*  g_shutdown_sock is a copy of the reader's local socket handle.    */
-/*  Its sole purpose: let WM_DESTROY call shutdown() to unblock        */
-/*  recv() without touching closesocket().                             */
-/*  The reader thread is the ONLY place that calls closesocket().      */
 /* ------------------------------------------------------------------ */
 
 static CRITICAL_SECTION g_shutdown_sock_cs;
 static SOCKET           g_shutdown_sock = INVALID_SOCKET;
 
-/* Reader publishes its socket so WM_DESTROY can reach it. */
 static void sock_set(SOCKET s)
 {
     EnterCriticalSection(&g_shutdown_sock_cs);
@@ -95,7 +109,6 @@ static void sock_set(SOCKET s)
     LeaveCriticalSection(&g_shutdown_sock_cs);
 }
 
-/* WM_DESTROY: wake up recv(). Never calls closesocket(). */
 static void sock_shutdown(void)
 {
     EnterCriticalSection(&g_shutdown_sock_cs);
@@ -104,18 +117,13 @@ static void sock_shutdown(void)
     LeaveCriticalSection(&g_shutdown_sock_cs);
 }
 
-/* ------------------------------------------------------------------ */
-/*  Reader socket helpers                                              */
-/* ------------------------------------------------------------------ */
-
-/* Close reader's local socket and clear the publish handle.
-   Single place for closesocket() -- prevents double-close. */
 static void close_reader_sock(SOCKET *psock)
 {
-    if (*psock != INVALID_SOCKET) {
-        closesocket(*psock);
-        sock_set(INVALID_SOCKET);
+    SOCKET s = *psock;
+    if (s != INVALID_SOCKET) {
         *psock = INVALID_SOCKET;
+        sock_set(INVALID_SOCKET);
+        closesocket(s);
     }
 }
 
@@ -126,8 +134,8 @@ static void close_reader_sock(SOCKET *psock)
 static int build_iscp(const char *cmd, unsigned char *pkt, int pktsz)
 {
     char payload[128];
-    int plen = _snprintf(payload, sizeof(payload), "%s\r", cmd);
-    if (plen <= 0 || plen >= (int)sizeof(payload)) return -1;
+    int plen = _snprintf_s(payload, sizeof(payload), _TRUNCATE, "%s\r", cmd);
+    if (plen < 0) return -1;
     if (16 + plen > pktsz) return -1;
 
     memset(pkt, 0, 16);
@@ -142,7 +150,6 @@ static int build_iscp(const char *cmd, unsigned char *pkt, int pktsz)
     return 16 + plen;
 }
 
-/* Blocking send; socket must be in blocking mode. */
 static int send_all(SOCKET s, const unsigned char *buf, int len)
 {
     int sent = 0;
@@ -154,7 +161,6 @@ static int send_all(SOCKET s, const unsigned char *buf, int len)
     return 1;
 }
 
-/* Returns 0-200 or -1. Validates hex digits before strtol. */
 static int parse_mvl(const char *payload, int len)
 {
     for (int i = 0; i <= len - 5; i++) {
@@ -170,7 +176,6 @@ static int parse_mvl(const char *payload, int len)
     return -1;
 }
 
-/* 1=on, -1=standby/off, 0=not a PWR packet */
 static int parse_pwr(const char *payload, int len)
 {
     for (int i = 0; i <= len - 3; i++) {
@@ -178,20 +183,30 @@ static int parse_pwr(const char *payload, int len)
             const char *val = payload + i + 3;
             int rem = len - i - 3;
             if (rem >= 2 && val[0]=='0' && val[1]=='1') return  1;
-            if (rem >= 2 && strncmp(val,"ON",2)       == 0) return  1;
+            if (rem >= 2 && strncmp(val, "ON", 2) == 0) return 1;
             if (rem >= 2 && val[0]=='0' && val[1]=='0') return -1;
-            if (rem >= 7 && strncmp(val,"STANDBY",7)  == 0) return -1;
-            if (rem >= 3 && strncmp(val,"OFF",3)      == 0) return -1;
+            if (rem >= 7 && strncmp(val, "STANDBY", 7) == 0) return -1;
+            if (rem >= 3 && strncmp(val, "OFF", 3) == 0) return -1;
         }
     }
     return 0;
 }
 
-/* Send MVLQSTN; returns 0 on failure (caller must close socket). */
 static int send_qstn(SOCKET s)
 {
     unsigned char pkt[64];
     int plen = build_iscp("!1MVLQSTN", pkt, sizeof(pkt));
+    return (plen > 0 && send_all(s, pkt, plen));
+}
+
+/* При реконнекте сначала спрашиваем статус питания, а не громкость.
+   Если ресивер в standby — он ответит PWRSTANDBY и мы покажем STATE_STANDBY.
+   Если включён — ответит PWR01/PWRON, и существующий код в парсере
+   автоматически отправит MVLQSTN и перейдёт в STATE_ONLINE. */
+static int send_pwr_qstn(SOCKET s)
+{
+    unsigned char pkt[64];
+    int plen = build_iscp("!1PWRQSTN", pkt, sizeof(pkt));
     return (plen > 0 && send_all(s, pkt, plen));
 }
 
@@ -205,18 +220,20 @@ static HANDLE g_stop_event;
 
 static void post_state(RecvState st, int vol)
 {
-    PostMessageA(g_hwnd, WM_SET_STATE, (WPARAM)st, (LPARAM)vol);
+    if (!is_shutting_down())
+        PostMessageA(g_hwnd, WM_SET_STATE, (WPARAM)st, (LPARAM)vol);
 }
 
 static DWORD WINAPI reader_thread(LPVOID arg)
 {
+    (void)arg;
+
     unsigned char stream[8192];
-    int    stream_len = 0;
-    SOCKET sock       = INVALID_SOCKET;
+    int stream_len = 0;
+    SOCKET sock = INVALID_SOCKET;
 
     while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
 
-        /* ---- connect ---- */
         if (sock == INVALID_SOCKET) {
             SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (s == INVALID_SOCKET) {
@@ -248,7 +265,8 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             FD_ZERO(&wfds); FD_SET(s, &wfds);
             FD_ZERO(&efds); FD_SET(s, &efds);
             struct timeval ctv = {3, 0};
-            if (select(0, NULL, &wfds, &efds, &ctv) <= 0) {
+            rc = select(0, NULL, &wfds, &efds, &ctv);
+            if (rc <= 0) {
                 closesocket(s);
                 post_state(STATE_OFFLINE, -1);
                 WaitForSingleObject(g_stop_event, 2000);
@@ -256,8 +274,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             }
 
             int sockerr = 0, errlen = sizeof(sockerr);
-            if (getsockopt(s, SOL_SOCKET, SO_ERROR,
-                           (char*)&sockerr, &errlen) != 0 || sockerr != 0) {
+            if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&sockerr, &errlen) != 0 || sockerr != 0) {
                 closesocket(s);
                 post_state(STATE_OFFLINE, -1);
                 WaitForSingleObject(g_stop_event, 2000);
@@ -268,11 +285,14 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             ioctlsocket(s, FIONBIO, &nb);
 
             sock = s;
-            sock_set(sock);   /* publish for WM_DESTROY */
+            sock_set(sock);
             stream_len = 0;
             post_state(STATE_CONNECTING, -1);
 
-            if (!send_qstn(sock)) {
+            /* FIX: запрашиваем статус питания, а не громкость.
+               Это позволяет корректно определить standby после выхода
+               компьютера из спящего режима. */
+            if (!send_pwr_qstn(sock)) {
                 close_reader_sock(&sock);
                 post_state(STATE_OFFLINE, -1);
                 continue;
@@ -281,12 +301,12 @@ static DWORD WINAPI reader_thread(LPVOID arg)
 
         if (WaitForSingleObject(g_stop_event, 0) == WAIT_OBJECT_0) break;
 
-        /* ---- wait for data (100 ms tick) ---- */
         fd_set rfds;
-        FD_ZERO(&rfds); FD_SET(sock, &rfds);
+        FD_ZERO(&rfds);
+        FD_SET(sock, &rfds);
+
         struct timeval tv = {0, 100000};
         int sel = select(0, &rfds, NULL, NULL, &tv);
-
         if (sel < 0) {
             close_reader_sock(&sock);
             stream_len = 0;
@@ -294,7 +314,6 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             continue;
         }
 
-        /* ---- drain command queue ---- */
         char cmd[CMD_MAXLEN];
         while (dequeue_cmd(cmd)) {
             unsigned char pkt[64];
@@ -308,11 +327,13 @@ static DWORD WINAPI reader_thread(LPVOID arg)
         }
         if (sock == INVALID_SOCKET) continue;
 
-        /* ---- recv ---- */
         if (!(sel > 0 && FD_ISSET(sock, &rfds))) continue;
 
         int room = (int)sizeof(stream) - stream_len - 1;
-        if (room <= 0) { stream_len = 0; room = (int)sizeof(stream) - 1; }
+        if (room <= 0) {
+            stream_len = 0;
+            room = (int)sizeof(stream) - 1;
+        }
 
         int r = recv(sock, (char*)stream + stream_len, room, 0);
         if (r == 0) {
@@ -329,16 +350,19 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             post_state(STATE_OFFLINE, -1);
             continue;
         }
+
         stream_len += r;
 
-        /* ---- parse complete eISCP packets ---- */
         while (stream_len >= 16) {
             if (memcmp(stream, "ISCP", 4) != 0) {
                 int skip = -1;
                 for (int i = 1; i <= stream_len - 4; i++) {
                     if (memcmp(stream + i, "ISCP", 4) == 0) { skip = i; break; }
                 }
-                if (skip < 0) { stream_len = 0; break; }
+                if (skip < 0) {
+                    stream_len = 0;
+                    break;
+                }
                 memmove(stream, stream + skip, stream_len - skip);
                 stream_len -= skip;
                 continue;
@@ -347,12 +371,18 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             uint32_t hdr_len =
                 ((uint32_t)stream[4]<<24)|((uint32_t)stream[5]<<16)|
                 ((uint32_t)stream[6]<<8) | (uint32_t)stream[7];
-            if (hdr_len != 16) { stream_len = 0; break; }
+            if (hdr_len != 16) {
+                stream_len = 0;
+                break;
+            }
 
             uint32_t data_len =
                 ((uint32_t)stream[8] <<24)|((uint32_t)stream[9] <<16)|
                 ((uint32_t)stream[10]<<8) | (uint32_t)stream[11];
-            if (data_len > 4096) { stream_len = 0; break; }
+            if (data_len > 4096) {
+                stream_len = 0;
+                break;
+            }
 
             int total = (int)(hdr_len + data_len);
             if (stream_len < total) break;
@@ -461,8 +491,9 @@ static HICON create_icon(int vol_raw, RecvState state)
     }
     default: {
         char txt[8];
-        if (dv < 0) strcpy(txt, "?");
-        else        sprintf(txt, "%d", dv);
+        if (dv < 0) strcpy_s(txt, sizeof(txt), "?");
+        else _snprintf_s(txt, sizeof(txt), _TRUNCATE, "%d", dv);
+
         HFONT font = CreateFontA(-9,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,
             DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,"Segoe UI");
@@ -500,12 +531,12 @@ static void update_tray(void)
              ? (g_vol_raw + 1) / 2 : -1;
 
     switch (g_state) {
-    case STATE_OFFLINE:    strcpy(g_nid.szTip,  "Pioneer: offline");     break;
-    case STATE_CONNECTING: strcpy(g_nid.szTip,  "Pioneer: connecting..."); break;
-    case STATE_STANDBY:    strcpy(g_nid.szTip,  "Pioneer: standby");     break;
+    case STATE_OFFLINE:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: offline"); break;
+    case STATE_CONNECTING: strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting..."); break;
+    case STATE_STANDBY:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: standby"); break;
     case STATE_ONLINE:
-        if (dv < 0) strcpy(g_nid.szTip, "Pioneer: ?");
-        else        sprintf(g_nid.szTip, "Pioneer: %d", dv);
+        if (dv < 0) strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: ?");
+        else _snprintf_s(g_nid.szTip, sizeof(g_nid.szTip), _TRUNCATE, "Pioneer: %d", dv);
         break;
     }
 
@@ -531,8 +562,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
 
-        RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C); /* VK_F13 */
-        RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D); /* VK_F14 */
+        if (!RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C)) OutputDebugStringA("Hotkey F13 failed\n");
+        if (!RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D)) OutputDebugStringA("Hotkey F14 failed\n");
 
         memset(&g_nid, 0, sizeof(g_nid));
         g_nid.cbSize           = sizeof(g_nid);
@@ -542,16 +573,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_nid.uCallbackMessage = WM_TRAY_ICON;
         g_icon = create_icon(-1, STATE_OFFLINE);
         g_nid.hIcon = g_icon;
-        strcpy(g_nid.szTip, "Pioneer: connecting...");
-        Shell_NotifyIconA(NIM_ADD, &g_nid);
+        strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting...");
+        if (!Shell_NotifyIconA(NIM_ADD, &g_nid)) OutputDebugStringA("Shell_NotifyIconA(NIM_ADD) failed\n");
 
         g_thread = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
         return 0;
     }
 
     case WM_SET_STATE: {
+        if (is_shutting_down()) return 0;
+
         RecvState new_state = (RecvState)(int)wp;
-        int       new_vol   = (int)lp;
+        int new_vol = (int)lp;
 
         if (new_state == g_state &&
             (new_state != STATE_ONLINE || new_vol == g_vol_raw))
@@ -568,7 +601,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_HOTKEY:
-        if (g_state == STATE_ONLINE) {
+        if (!is_shutting_down() && g_state == STATE_ONLINE) {
             if (wp == HOTKEY_VOL_DN) enqueue_cmd("!1MVLDOWN");
             if (wp == HOTKEY_VOL_UP) enqueue_cmd("!1MVLUP");
         }
@@ -598,28 +631,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_COMMAND:
-        if (LOWORD(wp) == IDM_POWER) {
-            if (g_state == STATE_STANDBY)
-                enqueue_cmd("!1PWR01");
-            else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
-                enqueue_cmd("!1PWR00");
+        if (!is_shutting_down()) {
+            if (LOWORD(wp) == IDM_POWER) {
+                if (g_state == STATE_STANDBY)
+                    enqueue_cmd("!1PWR01");
+                else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
+                    enqueue_cmd("!1PWR00");
+            }
+            if (LOWORD(wp) == IDM_REFRESH) {
+                enqueue_cmd("!1PWRQSTN");
+            }
+            if (LOWORD(wp) == IDM_EXIT)
+                DestroyWindow(hwnd);
         }
-        if (LOWORD(wp) == IDM_REFRESH) {
-            /* PWRQSTN works in all states; on PWR01 reader auto-sends MVLQSTN */
-            enqueue_cmd("!1PWRQSTN");
-        }
-        if (LOWORD(wp) == IDM_EXIT)
-            DestroyWindow(hwnd);
         return 0;
 
     case WM_DESTROY:
+        begin_shutdown();
+
         UnregisterHotKey(hwnd, HOTKEY_VOL_DN);
         UnregisterHotKey(hwnd, HOTKEY_VOL_UP);
         Shell_NotifyIconA(NIM_DELETE, &g_nid);
-        if (g_icon) DestroyIcon(g_icon);
+        if (g_icon) {
+            DestroyIcon(g_icon);
+            g_icon = NULL;
+        }
 
         SetEvent(g_stop_event);
-        sock_shutdown();   /* unblocks recv(); reader will closesocket() */
+        sock_shutdown();
 
         WaitForSingleObject(g_thread, 5000);
         CloseHandle(g_thread);
@@ -640,14 +679,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 {
+    (void)hPrev; (void)lpCmd; (void)nShow;
+
     WNDCLASSA wc = {0};
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
     wc.lpszClassName = "ISCPT";
     RegisterClassA(&wc);
 
-    g_hwnd = CreateWindowA("ISCPT","",0, 0,0,0,0,
-                           HWND_MESSAGE,NULL,hInst,NULL);
+    g_hwnd = CreateWindowA("ISCPT","",0, 0,0,0,0, HWND_MESSAGE, NULL, hInst, NULL);
 
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0)) {
