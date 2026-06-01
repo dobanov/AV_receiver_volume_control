@@ -29,7 +29,7 @@ gcc -O2 -mwindows receiver_tray.c -o receiver_tray.exe -lwininet -lshell32 -luse
 
 eISCP version
 
-gcc -O2 -mwindows receiver_tray_iscp.c -o receiver_tray_iscp.exe -lws2_32 -lshell32 -luser32 -lgdi32
+gcc -O2 -mwindows receiver_tray_iscp.c -o receiver_tray_eiscp.exe -lws2_32 -lshell32 -luser32 -lgdi32
 
 
 Настройка
