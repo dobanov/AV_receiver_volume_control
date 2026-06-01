@@ -29,7 +29,11 @@ gcc -O2 -mwindows receiver_tray.c -o receiver_tray.exe -lwininet -lshell32 -luse
 
 eISCP version
 
-gcc -O2 -mwindows receiver_tray_iscp.c -o receiver_tray_eiscp.exe -lws2_32 -lshell32 -luser32 -lgdi32
+
+gcc -Os -mwindows receiver_tray_iscp.c -o receiver_tray_iscp.exe \
+  -lws2_32 -lshell32 -luser32 -lgdi32 -s -fno-exceptions \
+  -fno-unwind-tables -fno-asynchronous-unwind-tables  -fomit-frame-pointer \
+  -falign-functions=1 -falign-jumps=1 -falign-loops=1 -falign-labels=1
 
 
 Настройка
