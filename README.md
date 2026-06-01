@@ -23,7 +23,12 @@ F14 — увеличить громкость
 
 Пример для MSYS2 (UCRT64):
 
+soap version
 gcc -O2 -mwindows receiver_tray.c -o receiver_tray.exe -lwininet -lshell32 -luser32 -lgdi32
+
+eISCP version
+gcc -O2 -mwindows receiver_tray_iscp.c -o receiver_tray_iscp.exe -lws2_32 -lshell32 -luser32 -lgdi32
+
 
 Настройка
 
