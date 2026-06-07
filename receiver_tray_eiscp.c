@@ -28,6 +28,9 @@
 #define HOTKEY_VOL_DN 1
 #define HOTKEY_VOL_UP 2
 
+/* vol_raw: 0..200, dv: 0..100 */
+#define VOL_RAW_TO_DV(r)  (((r) + 1) / 2)
+
 typedef enum {
     STATE_OFFLINE    = 0,
     STATE_CONNECTING = 1,
@@ -83,7 +86,6 @@ static void enqueue_cmd(const char *cmd)
 static int dequeue_cmd(char *out)
 {
     int ok = 0;
-
     EnterCriticalSection(&g_cmd_cs);
     if (g_cmd_head != g_cmd_tail) {
         strncpy_s(out, CMD_MAXLEN, g_cmd_buf[g_cmd_head].cmd, _TRUNCATE);
@@ -91,7 +93,6 @@ static int dequeue_cmd(char *out)
         ok = 1;
     }
     LeaveCriticalSection(&g_cmd_cs);
-
     return ok;
 }
 
@@ -183,7 +184,7 @@ static int parse_pwr(const char *payload, int len)
             const char *val = payload + i + 3;
             int rem = len - i - 3;
             if (rem >= 2 && val[0]=='0' && val[1]=='1') return  1;
-            if (rem >= 2 && strncmp(val, "ON", 2) == 0) return 1;
+            if (rem >= 2 && strncmp(val, "ON", 2) == 0) return  1;
             if (rem >= 2 && val[0]=='0' && val[1]=='0') return -1;
             if (rem >= 7 && strncmp(val, "STANDBY", 7) == 0) return -1;
             if (rem >= 3 && strncmp(val, "OFF", 3) == 0) return -1;
@@ -199,10 +200,6 @@ static int send_qstn(SOCKET s)
     return (plen > 0 && send_all(s, pkt, plen));
 }
 
-/* При реконнекте сначала спрашиваем статус питания, а не громкость.
-   Если ресивер в standby — он ответит PWRSTANDBY и мы покажем STATE_STANDBY.
-   Если включён — ответит PWR01/PWRON, и существующий код в парсере
-   автоматически отправит MVLQSTN и перейдёт в STATE_ONLINE. */
 static int send_pwr_qstn(SOCKET s)
 {
     unsigned char pkt[64];
@@ -289,9 +286,6 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             stream_len = 0;
             post_state(STATE_CONNECTING, -1);
 
-            /* FIX: запрашиваем статус питания, а не громкость.
-               Это позволяет корректно определить standby после выхода
-               компьютера из спящего режима. */
             if (!send_pwr_qstn(sock)) {
                 close_reader_sock(&sock);
                 post_state(STATE_OFFLINE, -1);
@@ -330,10 +324,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
         if (!(sel > 0 && FD_ISSET(sock, &rfds))) continue;
 
         int room = (int)sizeof(stream) - stream_len - 1;
-        if (room <= 0) {
-            stream_len = 0;
-            room = (int)sizeof(stream) - 1;
-        }
+        if (room <= 0) { stream_len = 0; room = (int)sizeof(stream) - 1; }
 
         int r = recv(sock, (char*)stream + stream_len, room, 0);
         if (r == 0) {
@@ -359,10 +350,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 for (int i = 1; i <= stream_len - 4; i++) {
                     if (memcmp(stream + i, "ISCP", 4) == 0) { skip = i; break; }
                 }
-                if (skip < 0) {
-                    stream_len = 0;
-                    break;
-                }
+                if (skip < 0) { stream_len = 0; break; }
                 memmove(stream, stream + skip, stream_len - skip);
                 stream_len -= skip;
                 continue;
@@ -371,18 +359,12 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             uint32_t hdr_len =
                 ((uint32_t)stream[4]<<24)|((uint32_t)stream[5]<<16)|
                 ((uint32_t)stream[6]<<8) | (uint32_t)stream[7];
-            if (hdr_len != 16) {
-                stream_len = 0;
-                break;
-            }
+            if (hdr_len != 16) { stream_len = 0; break; }
 
             uint32_t data_len =
                 ((uint32_t)stream[8] <<24)|((uint32_t)stream[9] <<16)|
                 ((uint32_t)stream[10]<<8) | (uint32_t)stream[11];
-            if (data_len > 4096) {
-                stream_len = 0;
-                break;
-            }
+            if (data_len > 4096) { stream_len = 0; break; }
 
             int total = (int)(hdr_len + data_len);
             if (stream_len < total) break;
@@ -433,7 +415,7 @@ static Color lerp_color(Color a, Color b, float t) {
 }
 
 static Color vol_color(int dv) {
-    if (dv < 0) return (Color){60,60,60};
+    if (dv < 0)  return (Color){60,60,60};
     if (dv <= 20) return lerp_color((Color){120,200,255},(Color){0,90,255},   dv/20.0f);
     if (dv <= 40) return lerp_color((Color){0,90,255},  (Color){0,220,80},   (dv-20)/20.0f);
     if (dv <= 60) return lerp_color((Color){0,220,80},  (Color){255,220,0},  (dv-40)/20.0f);
@@ -443,7 +425,7 @@ static Color vol_color(int dv) {
 
 static HICON create_icon(int vol_raw, RecvState state)
 {
-    int dv = (state == STATE_ONLINE && vol_raw >= 0) ? (vol_raw + 1) / 2 : -1;
+    int dv = (state == STATE_ONLINE && vol_raw >= 0) ? VOL_RAW_TO_DV(vol_raw) : -1;
 
     Color bg;
     switch (state) {
@@ -517,7 +499,7 @@ static HICON create_icon(int vol_raw, RecvState state)
 }
 
 /* ------------------------------------------------------------------ */
-/*  TRAY                                                               */
+/*  TRAY globals (объявлены до popup-кода, который их читает)         */
 /* ------------------------------------------------------------------ */
 
 static NOTIFYICONDATAA g_nid;
@@ -528,12 +510,12 @@ static RecvState g_state   = STATE_OFFLINE;
 static void update_tray(void)
 {
     int dv = (g_state == STATE_ONLINE && g_vol_raw >= 0)
-             ? (g_vol_raw + 1) / 2 : -1;
+             ? VOL_RAW_TO_DV(g_vol_raw) : -1;
 
     switch (g_state) {
-    case STATE_OFFLINE:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: offline"); break;
+    case STATE_OFFLINE:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: offline");       break;
     case STATE_CONNECTING: strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting..."); break;
-    case STATE_STANDBY:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: standby"); break;
+    case STATE_STANDBY:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: standby");       break;
     case STATE_ONLINE:
         if (dv < 0) strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: ?");
         else _snprintf_s(g_nid.szTip, sizeof(g_nid.szTip), _TRUNCATE, "Pioneer: %d", dv);
@@ -547,6 +529,281 @@ static void update_tray(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  VOLUME POPUP — кастомный нарисованный слайдер                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Окно POPUP_W x POPUP_H.
+ * Трек — вертикальная полоса по центру X, от TRACK_TOP до TRACK_BOT.
+ * dv: 0..100, 100 = верх = громко.
+ *
+ * Рывки устранены: сетевые обновления позиции игнорируются 700 мс
+ * после последнего действия пользователя (колесо / drag).
+ *
+ * Позиция: над иконкой в трее (Shell_NotifyIconGetRect).
+ */
+
+#define POPUP_W   36
+#define POPUP_H   180
+#define TRACK_X   (POPUP_W / 2)
+#define TRACK_TOP 12
+#define TRACK_BOT (POPUP_H - 12)
+#define TRACK_LEN (TRACK_BOT - TRACK_TOP)
+#define THUMB_R   7
+
+#define COL_BG       RGB(28,  28,  38)
+#define COL_TRACK    RGB(65,  65,  85)
+#define COL_FILL     RGB(80, 140, 220)
+#define COL_THUMB    RGB(255,255,255)
+#define COL_THUMB_HL RGB(180,210,255)
+
+static HWND      g_popup_hwnd  = NULL;
+static int       g_popup_dv    = 0;     /* 0..100 */
+static BOOL      g_popup_drag  = FALSE;
+static ULONGLONG g_popup_last_user = 0; /* GetTickCount64() последнего действия */
+
+static int dv_to_y(int dv)
+{
+    return TRACK_BOT - dv * TRACK_LEN / 100;
+}
+
+static int y_to_dv(int y)
+{
+    int dv = (TRACK_BOT - y) * 100 / TRACK_LEN;
+    if (dv < 0)   dv = 0;
+    if (dv > 100) dv = 100;
+    return dv;
+}
+
+static void popup_send_vol(int dv)
+{
+    int raw = dv * 2;
+    if (raw > 200) raw = 200;
+    char cmd[CMD_MAXLEN];
+    _snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "!1MVL%02X", raw);
+    enqueue_cmd(cmd);
+    g_popup_last_user = GetTickCount64();
+}
+
+/* Вызывается из WM_SET_STATE; игнорирует обновления сразу после
+   действия пользователя, чтобы не было рывков. */
+static void popup_net_update(int dv)
+{
+    if (!g_popup_hwnd) return;
+    if (g_popup_drag)  return;
+    if (GetTickCount64() - g_popup_last_user < 700) return;
+    if (dv == g_popup_dv) return;
+    g_popup_dv = dv;
+    InvalidateRect(g_popup_hwnd, NULL, FALSE);
+}
+
+static void popup_paint(HWND hwnd)
+{
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+
+    HDC     mem = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, POPUP_W, POPUP_H);
+    HBITMAP old = SelectObject(mem, bmp);
+
+    RECT rcAll = {0, 0, POPUP_W, POPUP_H};
+    HBRUSH hbg = CreateSolidBrush(COL_BG);
+    FillRect(mem, &rcAll, hbg);
+    DeleteObject(hbg);
+
+    int ty = dv_to_y(g_popup_dv);
+
+    /* Серая часть трека (выше бегунка) */
+    HBRUSH hbt = CreateSolidBrush(COL_TRACK);
+    RECT rt = {TRACK_X-2, TRACK_TOP, TRACK_X+3, ty};
+    FillRect(mem, &rt, hbt);
+    DeleteObject(hbt);
+
+    /* Синяя часть (ниже бегунка — заполнение громкости) */
+    HBRUSH hbf = CreateSolidBrush(COL_FILL);
+    RECT rf = {TRACK_X-2, ty, TRACK_X+3, TRACK_BOT};
+    FillRect(mem, &rf, hbf);
+    DeleteObject(hbf);
+
+    /* Бегунок — белый круг */
+    HBRUSH hbth = CreateSolidBrush(g_popup_drag ? COL_THUMB_HL : COL_THUMB);
+    SelectObject(mem, hbth);
+    SelectObject(mem, GetStockObject(NULL_PEN));
+    Ellipse(mem, TRACK_X-THUMB_R, ty-THUMB_R, TRACK_X+THUMB_R, ty+THUMB_R);
+    DeleteObject(hbth);
+
+    BitBlt(hdc, 0, 0, POPUP_W, POPUP_H, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    EndPaint(hwnd, &ps);
+}
+
+static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+
+    case WM_PAINT:
+        popup_paint(hwnd);
+        return 0;
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_LBUTTONDOWN: {
+        int my = (short)HIWORD(lp);
+        g_popup_drag = TRUE;
+        SetCapture(hwnd);
+        int dv = y_to_dv(my);
+        g_popup_dv = dv;
+        popup_send_vol(dv);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (!g_popup_drag) return 0;
+        int my = (short)HIWORD(lp);
+        int dv = y_to_dv(my);
+        if (dv != g_popup_dv) {
+            g_popup_dv = dv;
+            popup_send_vol(dv);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_LBUTTONUP:
+        if (g_popup_drag) {
+            g_popup_drag = FALSE;
+            ReleaseCapture();
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+
+    case WM_MOUSEWHEEL: {
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        int steps = delta / WHEEL_DELTA;
+        if (steps == 0) steps = (delta > 0) ? 1 : -1;
+        int dv = g_popup_dv + steps;
+        if (dv < 0)   dv = 0;
+        if (dv > 100) dv = 100;
+        if (dv != g_popup_dv) {
+            g_popup_dv = dv;
+            popup_send_vol(dv);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+        if (wp == VK_UP || wp == VK_RIGHT) {
+            int dv = g_popup_dv + 1; if (dv > 100) dv = 100;
+            g_popup_dv = dv; popup_send_vol(dv);
+            InvalidateRect(hwnd, NULL, FALSE); return 0;
+        }
+        if (wp == VK_DOWN || wp == VK_LEFT) {
+            int dv = g_popup_dv - 1; if (dv < 0) dv = 0;
+            g_popup_dv = dv; popup_send_vol(dv);
+            InvalidateRect(hwnd, NULL, FALSE); return 0;
+        }
+        break;
+
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        g_popup_hwnd = NULL;
+        g_popup_drag = FALSE;
+        return 0;
+    }
+
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static void create_volume_popup(void)
+{
+    if (g_popup_hwnd) {
+        DestroyWindow(g_popup_hwnd);
+        return;
+    }
+
+    /* Получаем точный прямоугольник иконки через Shell_NotifyIconGetRect */
+    RECT icon_rc = {0};
+    BOOL got_icon_rc = FALSE;
+    {
+        HMODULE hShell = GetModuleHandleA("shell32.dll");
+        if (hShell) {
+            typedef HRESULT (WINAPI *PFN)(const NOTIFYICONIDENTIFIER*, RECT*);
+            PFN pfn = (PFN)(void*)GetProcAddress(hShell, "Shell_NotifyIconGetRect");
+            if (pfn) {
+                NOTIFYICONIDENTIFIER nii = {0};
+                nii.cbSize = sizeof(nii);
+                nii.hWnd   = g_nid.hWnd;
+                nii.uID    = g_nid.uID;
+                got_icon_rc = SUCCEEDED(pfn(&nii, &icon_rc));
+            }
+        }
+    }
+
+    RECT work = {0};
+    SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
+
+    int x, y;
+
+    if (got_icon_rc) {
+        /* Центр иконки по X, попап всегда над иконкой */
+        int icx = (icon_rc.left + icon_rc.right) / 2;
+        x = icx - POPUP_W / 2;
+        y = icon_rc.top - POPUP_H - 4;
+    } else {
+        /* Fallback: над курсором */
+        POINT pt; GetCursorPos(&pt);
+        x = pt.x - POPUP_W / 2;
+        y = work.bottom - POPUP_H - 4;
+    }
+
+    /* Не выходим за рабочую область */
+    if (x < work.left)             x = work.left;
+    if (x + POPUP_W > work.right)  x = work.right  - POPUP_W;
+    if (y < work.top)              y = work.top;
+    if (y + POPUP_H > work.bottom) y = work.bottom - POPUP_H;
+
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASSA wc   = {0};
+        wc.lpfnWndProc   = VolumePopupProc;
+        wc.hInstance     = (HINSTANCE)GetWindowLongPtrA(g_hwnd, GWLP_HINSTANCE);
+        wc.hbrBackground = NULL;
+        wc.lpszClassName = "PioneerVolPopup";
+        RegisterClassA(&wc);
+        registered = TRUE;
+    }
+
+    g_popup_dv        = (g_state == STATE_ONLINE && g_vol_raw >= 0)
+                        ? VOL_RAW_TO_DV(g_vol_raw) : 0;
+    g_popup_drag      = FALSE;
+    g_popup_last_user = 0;
+
+    g_popup_hwnd = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        "PioneerVolPopup", "",
+        WS_POPUP | WS_BORDER,
+        x, y, POPUP_W, POPUP_H,
+        g_hwnd, NULL,
+        (HINSTANCE)GetWindowLongPtrA(g_hwnd, GWLP_HINSTANCE),
+        NULL);
+
+    if (!g_popup_hwnd) return;
+
+    ShowWindow(g_popup_hwnd, SW_SHOWNA);
+    SetForegroundWindow(g_popup_hwnd);
+    SetFocus(g_popup_hwnd);
+}
+
+/* ------------------------------------------------------------------ */
 /*  WINDOW PROC                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -556,11 +813,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_CREATE: {
         WSADATA wsa;
-        WSAStartup(MAKEWORD(2,2), &wsa);
+        if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
+            OutputDebugStringA("pioneer_tray: WSAStartup failed\n");
+            return -1;
+        }
         InitializeCriticalSection(&g_cmd_cs);
         InitializeCriticalSection(&g_shutdown_sock_cs);
 
         g_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+        if (!g_stop_event) {
+            OutputDebugStringA("pioneer_tray: CreateEventA failed\n");
+            return -1;
+        }
 
         if (!RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C)) OutputDebugStringA("Hotkey F13 failed\n");
         if (!RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D)) OutputDebugStringA("Hotkey F14 failed\n");
@@ -577,6 +841,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!Shell_NotifyIconA(NIM_ADD, &g_nid)) OutputDebugStringA("Shell_NotifyIconA(NIM_ADD) failed\n");
 
         g_thread = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
+        if (!g_thread) {
+            OutputDebugStringA("pioneer_tray: CreateThread failed\n");
+            DestroyWindow(hwnd);
+        }
         return 0;
     }
 
@@ -596,6 +864,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else
             g_vol_raw = -1;
 
+        if (g_state == STATE_ONLINE && g_vol_raw >= 0)
+            popup_net_update(VOL_RAW_TO_DV(g_vol_raw));
+
         update_tray();
         return 0;
     }
@@ -608,6 +879,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_TRAY_ICON:
+        if (LOWORD(lp) == WM_LBUTTONUP) {
+            if (!is_shutting_down() && g_state == STATE_ONLINE)
+                create_volume_popup();
+        }
         if (LOWORD(lp) == WM_RBUTTONUP) {
             POINT pt; GetCursorPos(&pt);
             HMENU m = CreatePopupMenu();
@@ -638,9 +913,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
                     enqueue_cmd("!1PWR00");
             }
-            if (LOWORD(wp) == IDM_REFRESH) {
+            if (LOWORD(wp) == IDM_REFRESH)
                 enqueue_cmd("!1PWRQSTN");
-            }
             if (LOWORD(wp) == IDM_EXIT)
                 DestroyWindow(hwnd);
         }
@@ -649,23 +923,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         begin_shutdown();
 
+        if (g_popup_hwnd) {
+            DestroyWindow(g_popup_hwnd);
+            g_popup_hwnd = NULL;
+        }
+
         UnregisterHotKey(hwnd, HOTKEY_VOL_DN);
         UnregisterHotKey(hwnd, HOTKEY_VOL_UP);
         Shell_NotifyIconA(NIM_DELETE, &g_nid);
-        if (g_icon) {
-            DestroyIcon(g_icon);
-            g_icon = NULL;
-        }
+        if (g_icon) { DestroyIcon(g_icon); g_icon = NULL; }
 
         SetEvent(g_stop_event);
         sock_shutdown();
 
-        WaitForSingleObject(g_thread, 5000);
-        CloseHandle(g_thread);
-        CloseHandle(g_stop_event);
-        DeleteCriticalSection(&g_cmd_cs);
-        DeleteCriticalSection(&g_shutdown_sock_cs);
-        WSACleanup();
+        if (g_thread) {
+            DWORD wr = WaitForSingleObject(g_thread, 5000);
+            if (wr == WAIT_OBJECT_0) {
+                CloseHandle(g_thread);
+                g_thread = NULL;
+                CloseHandle(g_stop_event);
+                DeleteCriticalSection(&g_cmd_cs);
+                DeleteCriticalSection(&g_shutdown_sock_cs);
+                WSACleanup();
+            } else {
+                /* Поток не завершился — не трогаем его ресурсы во избежание UB.
+                   ОС освободит всё при завершении процесса. */
+                OutputDebugStringA("pioneer_tray: reader thread didn't stop in time, leaking resources\n");
+            }
+        } else {
+            CloseHandle(g_stop_event);
+            DeleteCriticalSection(&g_cmd_cs);
+            DeleteCriticalSection(&g_shutdown_sock_cs);
+            WSACleanup();
+        }
+
         PostQuitMessage(0);
         return 0;
     }
