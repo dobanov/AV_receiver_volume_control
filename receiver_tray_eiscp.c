@@ -217,7 +217,7 @@ static HANDLE g_stop_event;
 
 static void post_state(RecvState st, int vol)
 {
-    if (!is_shutting_down())
+    if (!is_shutting_down() && IsWindow(g_hwnd))
         PostMessageA(g_hwnd, WM_SET_STATE, (WPARAM)st, (LPARAM)vol);
 }
 
@@ -499,7 +499,7 @@ static HICON create_icon(int vol_raw, RecvState state)
 }
 
 /* ------------------------------------------------------------------ */
-/*  TRAY globals (объявлены до popup-кода, который их читает)         */
+/*  TRAY globals                                                       */
 /* ------------------------------------------------------------------ */
 
 static NOTIFYICONDATAA g_nid;
@@ -529,13 +529,16 @@ static void update_tray(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  VOLUME POPUP — кастомный нарисованный слайдер                     */
+/*  VOLUME POPUP                                                       */
 /* ------------------------------------------------------------------ */
 
 /*
  * Окно POPUP_W x POPUP_H.
  * Трек — вертикальная полоса по центру X, от TRACK_TOP до TRACK_BOT.
  * dv: 0..100, 100 = верх = громко.
+ *
+ * Фон — серый RGB(100,100,100) с прозрачностью 35% (alpha=166).
+ * Используется WS_EX_LAYERED + SetLayeredWindowAttributes(LWA_ALPHA).
  *
  * Рывки устранены: сетевые обновления позиции игнорируются 700 мс
  * после последнего действия пользователя (колесо / drag).
@@ -551,16 +554,20 @@ static void update_tray(void)
 #define TRACK_LEN (TRACK_BOT - TRACK_TOP)
 #define THUMB_R   7
 
-#define COL_BG       RGB(28,  28,  38)
-#define COL_TRACK    RGB(65,  65,  85)
-#define COL_FILL     RGB(80, 140, 220)
-#define COL_THUMB    RGB(255,255,255)
-#define COL_THUMB_HL RGB(180,210,255)
+/* Серый фон вместо тёмного — окно будет дополнительно сделано
+   полупрозрачным через SetLayeredWindowAttributes (alpha=166, ~65%). */
+#define COL_BG       RGB(100, 100, 100)
+#define COL_TRACK    RGB(160, 160, 160)
+#define COL_FILL     RGB(80,  140, 220)
+#define COL_THUMB    RGB(255, 255, 255)
+#define COL_THUMB_HL RGB(180, 210, 255)
 
 static HWND      g_popup_hwnd  = NULL;
 static int       g_popup_dv    = 0;     /* 0..100 */
 static BOOL      g_popup_drag  = FALSE;
-static ULONGLONG g_popup_last_user = 0; /* GetTickCount64() последнего действия */
+static ULONGLONG g_popup_last_user = 0;
+static ULONGLONG g_popup_last_send = 0; /* throttle: последняя отправка MVL */
+#define POPUP_SEND_INTERVAL_MS 40        /* не чаще 25 команд/с при drag      */
 
 static int dv_to_y(int dv)
 {
@@ -575,18 +582,24 @@ static int y_to_dv(int y)
     return dv;
 }
 
-static void popup_send_vol(int dv)
+static void popup_send_vol(int dv, BOOL force)
 {
+    ULONGLONG now = GetTickCount64();
+    /* При drag пропускаем слишком частые команды; force=TRUE — при отпускании
+       кнопки, колёсике и клавишах, чтобы финальное значение всегда дошло. */
+    if (!force && g_popup_drag &&
+        (now - g_popup_last_send) < POPUP_SEND_INTERVAL_MS)
+        return;
+
     int raw = dv * 2;
     if (raw > 200) raw = 200;
     char cmd[CMD_MAXLEN];
     _snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "!1MVL%02X", raw);
     enqueue_cmd(cmd);
-    g_popup_last_user = GetTickCount64();
+    g_popup_last_send = now;
+    g_popup_last_user = now;
 }
 
-/* Вызывается из WM_SET_STATE; игнорирует обновления сразу после
-   действия пользователя, чтобы не было рывков. */
 static void popup_net_update(int dv)
 {
     if (!g_popup_hwnd) return;
@@ -656,7 +669,7 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         SetCapture(hwnd);
         int dv = y_to_dv(my);
         g_popup_dv = dv;
-        popup_send_vol(dv);
+        popup_send_vol(dv, FALSE);
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
@@ -667,7 +680,7 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         int dv = y_to_dv(my);
         if (dv != g_popup_dv) {
             g_popup_dv = dv;
-            popup_send_vol(dv);
+            popup_send_vol(dv, FALSE);
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -677,6 +690,7 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (g_popup_drag) {
             g_popup_drag = FALSE;
             ReleaseCapture();
+            popup_send_vol(g_popup_dv, TRUE); /* финальная позиция — всегда отправляем */
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -690,7 +704,7 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (dv > 100) dv = 100;
         if (dv != g_popup_dv) {
             g_popup_dv = dv;
-            popup_send_vol(dv);
+            popup_send_vol(dv, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
@@ -700,12 +714,12 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
         if (wp == VK_UP || wp == VK_RIGHT) {
             int dv = g_popup_dv + 1; if (dv > 100) dv = 100;
-            g_popup_dv = dv; popup_send_vol(dv);
+            g_popup_dv = dv; popup_send_vol(dv, TRUE);
             InvalidateRect(hwnd, NULL, FALSE); return 0;
         }
         if (wp == VK_DOWN || wp == VK_LEFT) {
             int dv = g_popup_dv - 1; if (dv < 0) dv = 0;
-            g_popup_dv = dv; popup_send_vol(dv);
+            g_popup_dv = dv; popup_send_vol(dv, TRUE);
             InvalidateRect(hwnd, NULL, FALSE); return 0;
         }
         break;
@@ -754,12 +768,10 @@ static void create_volume_popup(void)
     int x, y;
 
     if (got_icon_rc) {
-        /* Центр иконки по X, попап всегда над иконкой */
         int icx = (icon_rc.left + icon_rc.right) / 2;
         x = icx - POPUP_W / 2;
         y = icon_rc.top - POPUP_H - 4;
     } else {
-        /* Fallback: над курсором */
         POINT pt; GetCursorPos(&pt);
         x = pt.x - POPUP_W / 2;
         y = work.bottom - POPUP_H - 4;
@@ -786,9 +798,11 @@ static void create_volume_popup(void)
                         ? VOL_RAW_TO_DV(g_vol_raw) : 0;
     g_popup_drag      = FALSE;
     g_popup_last_user = 0;
+    g_popup_last_send = 0;
 
+    /* WS_EX_LAYERED добавлен для поддержки полупрозрачности */
     g_popup_hwnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         "PioneerVolPopup", "",
         WS_POPUP | WS_BORDER,
         x, y, POPUP_W, POPUP_H,
@@ -797,6 +811,9 @@ static void create_volume_popup(void)
         NULL);
 
     if (!g_popup_hwnd) return;
+
+    /* Прозрачность 35%: alpha = round(255 * 0.65) = 166 */
+    SetLayeredWindowAttributes(g_popup_hwnd, 0, 166, LWA_ALPHA);
 
     ShowWindow(g_popup_hwnd, SW_SHOWNA);
     SetForegroundWindow(g_popup_hwnd);
