@@ -4,14 +4,14 @@ Protocol: eISCP over TCP
 */
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0600
-#include  <winsock2.h >
-#include  <ws2tcpip.h >
-#include  <windows.h >
-#include  <shellapi.h >
-#include  <stdio.h >
-#include  <stdint.h >
-#include  <ctype.h >
-#include  <string.h >
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <shellapi.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <ctype.h>
+#include <string.h>
 #pragma comment(lib, "ws2_32.lib")
 
 #define DEVICE_IP    "192.168.1.53"
@@ -188,11 +188,11 @@ static int parse_pwr(const char *payload, int len)
         if (payload[i]=='P' && payload[i+1]=='W' && payload[i+2]=='R') {
             const char *val = payload + i + 3;
             int rem = len - i - 3;
-            if (rem >= 2 && val[0]=='0' && val[1]=='1') return  1;
-            if (rem >= 2 && strncmp(val, "ON ", 2) == 0) return  1;
+            if (rem >= 2 && val[0]=='0' && val[1]=='1') return 1;
+            if (rem >= 2 && strncmp(val, "ON", 2) == 0) return 1;
             if (rem >= 2 && val[0]=='0' && val[1]=='0') return -1;
-            if (rem >= 7 && strncmp(val, "STANDBY ", 7) == 0) return -1;
-            if (rem >= 3 && strncmp(val, "OFF ", 3) == 0) return -1;
+            if (rem >= 7 && strncmp(val, "STANDBY", 7) == 0) return -1;
+            if (rem >= 3 && strncmp(val, "OFF", 3) == 0) return -1;
         }
     }
     return 0;
@@ -231,7 +231,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
     unsigned char stream[8192];
     int stream_len = 0;
     SOCKET sock = INVALID_SOCKET;
-
+    
     while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
         if (sock == INVALID_SOCKET) {
             SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -283,17 +283,17 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             sock = s;
             sock_set(sock);
             stream_len = 0;
-            post_state(STATE_CONNECTING, -1);
             
+            post_state(STATE_CONNECTING, -1);
             if (!send_pwr_qstn(sock)) {
                 close_reader_sock(&sock);
                 post_state(STATE_OFFLINE, -1);
                 continue;
             }
         }
-
+        
         if (WaitForSingleObject(g_stop_event, 0) == WAIT_OBJECT_0) break;
-
+        
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(sock, &rfds);
@@ -305,7 +305,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             post_state(STATE_OFFLINE, -1);
             continue;
         }
-
+        
         char cmd[CMD_MAXLEN];
         while (dequeue_cmd(cmd)) {
             unsigned char pkt[64];
@@ -317,10 +317,10 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 break;
             }
         }
-
+        
         if (sock == INVALID_SOCKET) continue;
         if (!(sel > 0 && FD_ISSET(sock, &rfds))) continue;
-
+        
         int room = (int)sizeof(stream) - stream_len - 1;
         if (room <= 0) { stream_len = 0; room = (int)sizeof(stream) - 1; }
         
@@ -339,9 +339,9 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             post_state(STATE_OFFLINE, -1);
             continue;
         }
-
+        
         stream_len += r;
-
+        
         while (stream_len >= 16) {
             if (memcmp(stream, "ISCP", 4) != 0) {
                 int skip = -1;
@@ -353,24 +353,24 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 stream_len -= skip;
                 continue;
             }
-
+            
             uint32_t hdr_len =
                 ((uint32_t)stream[4]<<24)|((uint32_t)stream[5]<<16)|
                 ((uint32_t)stream[6]<<8) | (uint32_t)stream[7];
             if (hdr_len != 16) { stream_len = 0; break; }
-
+            
             uint32_t data_len =
                 ((uint32_t)stream[8] <<24)|((uint32_t)stream[9] <<16)|
                 ((uint32_t)stream[10]<<8) | (uint32_t)stream[11];
             if (data_len > 4096) { stream_len = 0; break; }
-
+            
             int total = (int)(hdr_len + data_len);
             if (stream_len < total) break;
-
+            
             char payload[4097];
             memcpy(payload, stream + hdr_len, data_len);
             payload[data_len] = 0;
-
+            
             int v = parse_mvl(payload, (int)data_len);
             if (v >= 0) {
                 post_state(STATE_ONLINE, v);
@@ -386,7 +386,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                     }
                 }
             }
-
+            
             int remain = stream_len - total;
             if (remain > 0)
                 memmove(stream, stream + total, (size_t)remain);
@@ -429,18 +429,18 @@ static HICON create_icon(int vol_raw, RecvState state)
         case STATE_STANDBY:    bg = (Color){60, 45, 20}; break;
         default:               bg = vol_color(dv);       break;
     }
-
+    
     HDC hdc = GetDC(NULL);
     HDC mem = CreateCompatibleDC(hdc);
     HBITMAP bmp  = CreateCompatibleBitmap(hdc, 16, 16);
     HBITMAP mask = CreateBitmap(16, 16, 1, 1, NULL);
     HBITMAP old  = SelectObject(mem, bmp);
-    RECT rc = {0,0,16,16};
     
+    RECT rc = {0,0,16,16};
     HBRUSH br = CreateSolidBrush(RGB(bg.r,bg.g,bg.b));
     FillRect(mem, &rc, br);
     DeleteObject(br);
-
+    
     switch (state) {
         case STATE_OFFLINE: {
             HPEN pen = CreatePen(PS_SOLID, 2, RGB(180,40,40));
@@ -476,6 +476,7 @@ static HICON create_icon(int vol_raw, RecvState state)
                 CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,"Segoe UI");
             HFONT oldf = SelectObject(mem, font);
             SetBkMode(mem, TRANSPARENT);
+            
             int bright = bg.r*30 + bg.g*59 + bg.b*11;
             SetTextColor(mem, (bright > 12000) ? RGB(20,20,20) : RGB(240,240,240));
             DrawTextA(mem, txt, -1, &rc, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
@@ -483,7 +484,7 @@ static HICON create_icon(int vol_raw, RecvState state)
             break;
         }
     }
-
+    
     SelectObject(mem, old);
     ICONINFO ii = {0};
     ii.fIcon=TRUE; ii.hbmColor=bmp; ii.hbmMask=mask;
@@ -542,7 +543,7 @@ static int       g_popup_dv    = 0;     /* 0..100 */
 static BOOL      g_popup_drag  = FALSE;
 static ULONGLONG g_popup_last_user = 0;
 static ULONGLONG g_popup_last_send = 0; /* throttle: последняя отправка MVL */
-#define POPUP_SEND_INTERVAL_MS 40        /* не чаще 25 команд/с при drag */
+#define POPUP_SEND_INTERVAL_MS 40       /* не чаще 25 команд/с при drag */
 
 static int dv_to_y(int dv)
 {
@@ -568,7 +569,6 @@ static void popup_send_vol(int dv, BOOL force)
     char cmd[CMD_MAXLEN];
     _snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "!1MVL%02X", raw);
     enqueue_cmd(cmd);
-    
     g_popup_last_send = now;
     g_popup_last_user = now;
 }
@@ -588,33 +588,34 @@ static void popup_paint(HWND hwnd)
 {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
+    
     HDC mem = CreateCompatibleDC(hdc);
     HBITMAP bmp = CreateCompatibleBitmap(hdc, POPUP_W, POPUP_H);
     HBITMAP old = SelectObject(mem, bmp);
-    RECT rcAll = {0, 0, POPUP_W, POPUP_H};
     
+    RECT rcAll = {0, 0, POPUP_W, POPUP_H};
     HBRUSH hbg = CreateSolidBrush(COL_BG);
     FillRect(mem, &rcAll, hbg);
     DeleteObject(hbg);
-
+    
     int ty = dv_to_y(g_popup_dv);
     
     HBRUSH hbt = CreateSolidBrush(COL_TRACK);
     RECT rt = {TRACK_X-2, TRACK_TOP, TRACK_X+3, ty};
     FillRect(mem, &rt, hbt);
     DeleteObject(hbt);
-
+    
     HBRUSH hbf = CreateSolidBrush(COL_FILL);
     RECT rf = {TRACK_X-2, ty, TRACK_X+3, TRACK_BOT};
     FillRect(mem, &rf, hbf);
     DeleteObject(hbf);
-
+    
     HBRUSH hbth = CreateSolidBrush(g_popup_drag ? COL_THUMB_HL : COL_THUMB);
     SelectObject(mem, hbth);
     SelectObject(mem, GetStockObject(NULL_PEN));
     Ellipse(mem, TRACK_X-THUMB_R, ty-THUMB_R, TRACK_X+THUMB_R, ty+THUMB_R);
     DeleteObject(hbth);
-
+    
     BitBlt(hdc, 0, 0, POPUP_W, POPUP_H, mem, 0, 0, SRCCOPY);
     
     SelectObject(mem, old);
@@ -665,19 +666,15 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             int steps = delta / WHEEL_DELTA;
             if (steps == 0) steps = (delta > 0) ? 1 : -1;
             
-            const char *cmd = (steps > 0) ? "!1MVLUP" : "!1MVLDOWN";
-            int abs_steps = steps < 0 ? -steps : steps;
-            for (int i = 0; i < abs_steps; i++)
-                enqueue_cmd(cmd);
+            /* Изменяем сразу визуальное значение dv на количество шагов */
+            int new_dv = g_popup_dv + steps;
+            if (new_dv < 0) new_dv = 0;
+            if (new_dv > 100) new_dv = 100;
             
-            g_popup_last_user = GetTickCount64();
-            int new_raw = g_popup_dv * 2 + steps;
-            if (new_raw < 0)   new_raw = 0;
-            if (new_raw > 200) new_raw = 200;
-            int new_dv = VOL_RAW_TO_DV(new_raw);
-            
+            /* Если значение изменилось, обновляем UI и шлем абсолютную команду */
             if (new_dv != g_popup_dv) {
                 g_popup_dv = new_dv;
+                popup_send_vol(new_dv, TRUE); /* TRUE игнорирует троттлинг для мгновенной реакции */
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             return 0;
@@ -712,7 +709,7 @@ static void create_volume_popup(void)
         DestroyWindow(g_popup_hwnd);
         return;
     }
-
+    
     RECT icon_rc = {0};
     BOOL got_icon_rc = FALSE;
     {
@@ -729,7 +726,7 @@ static void create_volume_popup(void)
             }
         }
     }
-
+    
     RECT work = {0};
     SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
     int x, y;
@@ -742,12 +739,12 @@ static void create_volume_popup(void)
         x = pt.x - POPUP_W / 2;
         y = work.bottom - POPUP_H - 4;
     }
-
+    
     if (x < work.left)             x = work.left;
     if (x + POPUP_W > work.right)  x = work.right  - POPUP_W;
     if (y < work.top)              y = work.top;
     if (y + POPUP_H > work.bottom) y = work.bottom - POPUP_H;
-
+    
     static BOOL registered = FALSE;
     if (!registered) {
         WNDCLASSA wc   = {0};
@@ -758,12 +755,12 @@ static void create_volume_popup(void)
         RegisterClassA(&wc);
         registered = TRUE;
     }
-
+    
     g_popup_dv        = (g_state == STATE_ONLINE && g_vol_raw >= 0) ? VOL_RAW_TO_DV(g_vol_raw) : 0;
     g_popup_drag      = FALSE;
     g_popup_last_user = 0;
     g_popup_last_send = 0;
-
+    
     g_popup_hwnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         "PioneerVolPopup", "",
@@ -772,7 +769,6 @@ static void create_volume_popup(void)
         g_hwnd, NULL,
         (HINSTANCE)GetWindowLongPtrA(g_hwnd, GWLP_HINSTANCE),
         NULL);
-
     if (!g_popup_hwnd) return;
     
     SetLayeredWindowAttributes(g_popup_hwnd, 0, 166, LWA_ALPHA);
@@ -795,29 +791,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             InitializeCriticalSection(&g_cmd_cs);
             InitializeCriticalSection(&g_shutdown_sock_cs);
-            
             g_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
             if (!g_stop_event) {
                 OutputDebugStringA("pioneer_tray: CreateEventA failed\n");
                 return -1;
             }
-
             if (!RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C)) OutputDebugStringA("Hotkey F13 failed\n");
             if (!RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D)) OutputDebugStringA("Hotkey F14 failed\n");
-
+            
             memset(&g_nid, 0, sizeof(g_nid));
             g_nid.cbSize           = sizeof(g_nid);
             g_nid.hWnd             = hwnd;
             g_nid.uID              = 1;
             g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
             g_nid.uCallbackMessage = WM_TRAY_ICON;
-            
             g_icon = create_icon(-1, STATE_OFFLINE);
             g_nid.hIcon = g_icon;
             strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting...");
-            
             if (!Shell_NotifyIconA(NIM_ADD, &g_nid)) OutputDebugStringA("Shell_NotifyIconA(NIM_ADD) failed\n");
-
+            
             g_thread = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
             if (!g_thread) {
                 OutputDebugStringA("pioneer_tray: CreateThread failed\n");
@@ -825,15 +817,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
         }
-
         case WM_SET_STATE: {
             if (is_shutting_down()) return 0;
             RecvState new_state = (RecvState)(int)wp;
             int new_vol = (int)lp;
-            
             if (new_state == g_state && (new_state != STATE_ONLINE || new_vol == g_vol_raw))
                 return 0;
-                
+            
             g_state = new_state;
             if (new_state == STATE_ONLINE && new_vol >= 0)
                 g_vol_raw = new_vol;
@@ -842,18 +832,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 
             if (g_state == STATE_ONLINE && g_vol_raw >= 0)
                 popup_net_update(VOL_RAW_TO_DV(g_vol_raw));
-                
             update_tray();
             return 0;
         }
-
         case WM_HOTKEY:
             if (!is_shutting_down() && g_state == STATE_ONLINE) {
                 if (wp == HOTKEY_VOL_DN) enqueue_cmd("!1MVLDOWN");
                 if (wp == HOTKEY_VOL_UP) enqueue_cmd("!1MVLUP");
             }
             return 0;
-
         case WM_TRAY_ICON:
             if (LOWORD(lp) == WM_LBUTTONUP) {
                 if (!is_shutting_down() && g_state == STATE_ONLINE)
@@ -862,7 +849,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (LOWORD(lp) == WM_RBUTTONUP) {
                 POINT pt; GetCursorPos(&pt);
                 HMENU m = CreatePopupMenu();
-                
                 if (g_state == STATE_STANDBY) {
                     AppendMenuA(m, MF_STRING, IDM_POWER, "Power On");
                 } else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING) {
@@ -871,7 +857,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     AppendMenuA(m, MF_GRAYED | MF_STRING, IDM_POWER, "Power");
                 }
                 
-                /* Меню выбора источника (активно только в состоянии ONLINE) */
+                /* Меню выбора источника (доступно только в состоянии ONLINE) */
                 if (g_state == STATE_ONLINE) {
                     HMENU srcMenu = CreatePopupMenu();
                     AppendMenuA(srcMenu, MF_STRING, IDM_SRC_HDMI5, "HDMI 5");
@@ -886,7 +872,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     AppendMenuA(srcMenu, MF_STRING, IDM_SRC_USB, "USB");
                     AppendMenuA(srcMenu, MF_STRING, IDM_SRC_BT, "BLUETOOTH");
                     AppendMenuA(srcMenu, MF_STRING, IDM_SRC_NET, "NET");
-                    
                     AppendMenuA(m, MF_POPUP, (UINT_PTR)srcMenu, "Source");
                 } else {
                     AppendMenuA(m, MF_GRAYED | MF_STRING, 0, "Source");
@@ -900,7 +885,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 DestroyMenu(m);
             }
             return 0;
-
         case WM_COMMAND:
             if (!is_shutting_down()) {
                 if (LOWORD(wp) == IDM_POWER) {
@@ -909,7 +893,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
                         enqueue_cmd("!1PWR00");
                 }
-                
                 /* Обработка команд выбора источника (Input Selector SLI) */
                 if (LOWORD(wp) == IDM_SRC_HDMI5) enqueue_cmd("!1SLI55");
                 if (LOWORD(wp) == IDM_SRC_HDMI6) enqueue_cmd("!1SLI56");
@@ -927,7 +910,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     DestroyWindow(hwnd);
             }
             return 0;
-
         case WM_DESTROY:
             begin_shutdown();
             if (g_popup_hwnd) {
@@ -937,9 +919,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             UnregisterHotKey(hwnd, HOTKEY_VOL_DN);
             UnregisterHotKey(hwnd, HOTKEY_VOL_UP);
             Shell_NotifyIconA(NIM_DELETE, &g_nid);
-            
             if (g_icon) { DestroyIcon(g_icon); g_icon = NULL; }
-            
             SetEvent(g_stop_event);
             sock_shutdown();
             
@@ -973,7 +953,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 {
     (void)hPrev; (void)lpCmd; (void)nShow;
-    
     WNDCLASSA wc = {0};
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
