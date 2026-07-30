@@ -1,20 +1,17 @@
 /*
- * Pioneer AVR tray volume controller
- * Protocol: eISCP over TCP
- */
-
+Pioneer AVR tray volume controller
+Protocol: eISCP over TCP
+*/
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0600
-
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#include <shellapi.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <ctype.h>
-#include <string.h>
-
+#include  <winsock2.h >
+#include  <ws2tcpip.h >
+#include  <windows.h >
+#include  <shellapi.h >
+#include  <stdio.h >
+#include  <stdint.h >
+#include  <ctype.h >
+#include  <string.h >
 #pragma comment(lib, "ws2_32.lib")
 
 #define DEVICE_IP    "192.168.1.53"
@@ -22,9 +19,23 @@
 
 #define WM_TRAY_ICON  (WM_USER + 1)
 #define WM_SET_STATE  (WM_USER + 2)  /* wparam=RecvState lparam=vol(-1 if n/a) */
+
 #define IDM_EXIT      1001
-#define IDM_REFRESH   1002
 #define IDM_POWER     1003
+
+/* Source selection IDs (start from 2000 to avoid WM_USER collisions) */
+#define IDM_SRC_HDMI5 2010
+#define IDM_SRC_HDMI6 2011
+#define IDM_SRC_BD    2012
+#define IDM_SRC_CBL   2013
+#define IDM_SRC_STRM  2014
+#define IDM_SRC_TV    2015
+#define IDM_SRC_GAME  2016
+#define IDM_SRC_CD    2017
+#define IDM_SRC_USB   2018
+#define IDM_SRC_BT    2019
+#define IDM_SRC_NET   2020
+
 #define HOTKEY_VOL_DN 1
 #define HOTKEY_VOL_UP 2
 
@@ -39,9 +50,8 @@ typedef enum {
 } RecvState;
 
 /* ------------------------------------------------------------------ */
-/*  Global shutdown flag                                               */
+/*  Global shutdown flag                                              */
 /* ------------------------------------------------------------------ */
-
 static volatile LONG g_shutting_down = 0;
 
 static int is_shutting_down(void)
@@ -55,9 +65,8 @@ static void begin_shutdown(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Command queue                                                      */
+/*  Command queue                                                     */
 /* ------------------------------------------------------------------ */
-
 #define CMD_MAXLEN 32
 #define CMD_QUEUE  64
 
@@ -71,7 +80,6 @@ static int              g_cmd_tail = 0;
 static void enqueue_cmd(const char *cmd)
 {
     if (is_shutting_down()) return;
-
     EnterCriticalSection(&g_cmd_cs);
     int next = (g_cmd_tail + 1) % CMD_QUEUE;
     if (next != g_cmd_head) {
@@ -97,9 +105,8 @@ static int dequeue_cmd(char *out)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Shutdown socket                                                    */
+/*  Shutdown socket                                                   */
 /* ------------------------------------------------------------------ */
-
 static CRITICAL_SECTION g_shutdown_sock_cs;
 static SOCKET           g_shutdown_sock = INVALID_SOCKET;
 
@@ -129,16 +136,15 @@ static void close_reader_sock(SOCKET *psock)
 }
 
 /* ------------------------------------------------------------------ */
-/*  eISCP helpers                                                      */
+/*  eISCP helpers                                                     */
 /* ------------------------------------------------------------------ */
-
 static int build_iscp(const char *cmd, unsigned char *pkt, int pktsz)
 {
     char payload[128];
     int plen = _snprintf_s(payload, sizeof(payload), _TRUNCATE, "%s\r", cmd);
     if (plen < 0) return -1;
     if (16 + plen > pktsz) return -1;
-
+    
     memset(pkt, 0, 16);
     memcpy(pkt, "ISCP", 4);
     pkt[7]  = 0x10;
@@ -155,7 +161,7 @@ static int send_all(SOCKET s, const unsigned char *buf, int len)
 {
     int sent = 0;
     while (sent < len) {
-        int n = send(s, (const char*)buf + sent, len - sent, 0);
+        int n = send(s, (const char *)buf + sent, len - sent, 0);
         if (n <= 0) return 0;
         sent += n;
     }
@@ -167,8 +173,7 @@ static int parse_mvl(const char *payload, int len)
     for (int i = 0; i <= len - 5; i++) {
         if (payload[i]=='M' && payload[i+1]=='V' && payload[i+2]=='L') {
             char hi = payload[i+3], lo = payload[i+4];
-            if (!isxdigit((unsigned char)hi) ||
-                !isxdigit((unsigned char)lo)) continue;
+            if (!isxdigit((unsigned char)hi) || !isxdigit((unsigned char)lo)) continue;
             char tmp[3] = { hi, lo, 0 };
             long v = strtol(tmp, NULL, 16);
             if (v >= 0 && v <= 200) return (int)v;
@@ -184,10 +189,10 @@ static int parse_pwr(const char *payload, int len)
             const char *val = payload + i + 3;
             int rem = len - i - 3;
             if (rem >= 2 && val[0]=='0' && val[1]=='1') return  1;
-            if (rem >= 2 && strncmp(val, "ON", 2) == 0) return  1;
+            if (rem >= 2 && strncmp(val, "ON ", 2) == 0) return  1;
             if (rem >= 2 && val[0]=='0' && val[1]=='0') return -1;
-            if (rem >= 7 && strncmp(val, "STANDBY", 7) == 0) return -1;
-            if (rem >= 3 && strncmp(val, "OFF", 3) == 0) return -1;
+            if (rem >= 7 && strncmp(val, "STANDBY ", 7) == 0) return -1;
+            if (rem >= 3 && strncmp(val, "OFF ", 3) == 0) return -1;
         }
     }
     return 0;
@@ -208,9 +213,8 @@ static int send_pwr_qstn(SOCKET s)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Reader thread                                                      */
+/*  Reader thread                                                     */
 /* ------------------------------------------------------------------ */
-
 static HWND   g_hwnd;
 static HANDLE g_thread;
 static HANDLE g_stop_event;
@@ -224,13 +228,11 @@ static void post_state(RecvState st, int vol)
 static DWORD WINAPI reader_thread(LPVOID arg)
 {
     (void)arg;
-
     unsigned char stream[8192];
     int stream_len = 0;
     SOCKET sock = INVALID_SOCKET;
 
     while (WaitForSingleObject(g_stop_event, 0) != WAIT_OBJECT_0) {
-
         if (sock == INVALID_SOCKET) {
             SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (s == INVALID_SOCKET) {
@@ -238,18 +240,16 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 WaitForSingleObject(g_stop_event, 2000);
                 continue;
             }
-
             BOOL ka = TRUE;
             setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));
-
             u_long nb = 1;
             ioctlsocket(s, FIONBIO, &nb);
-
+            
             struct sockaddr_in addr = {0};
             addr.sin_family = AF_INET;
             addr.sin_port   = htons(DEVICE_PORT);
             InetPtonA(AF_INET, DEVICE_IP, &addr.sin_addr);
-
+            
             int rc = connect(s, (struct sockaddr*)&addr, sizeof(addr));
             if (rc == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
                 closesocket(s);
@@ -257,7 +257,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 WaitForSingleObject(g_stop_event, 2000);
                 continue;
             }
-
+            
             fd_set wfds, efds;
             FD_ZERO(&wfds); FD_SET(s, &wfds);
             FD_ZERO(&efds); FD_SET(s, &efds);
@@ -269,7 +269,7 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 WaitForSingleObject(g_stop_event, 2000);
                 continue;
             }
-
+            
             int sockerr = 0, errlen = sizeof(sockerr);
             if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&sockerr, &errlen) != 0 || sockerr != 0) {
                 closesocket(s);
@@ -277,15 +277,14 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 WaitForSingleObject(g_stop_event, 2000);
                 continue;
             }
-
+            
             nb = 0;
             ioctlsocket(s, FIONBIO, &nb);
-
             sock = s;
             sock_set(sock);
             stream_len = 0;
             post_state(STATE_CONNECTING, -1);
-
+            
             if (!send_pwr_qstn(sock)) {
                 close_reader_sock(&sock);
                 post_state(STATE_OFFLINE, -1);
@@ -298,7 +297,6 @@ static DWORD WINAPI reader_thread(LPVOID arg)
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(sock, &rfds);
-
         struct timeval tv = {0, 100000};
         int sel = select(0, &rfds, NULL, NULL, &tv);
         if (sel < 0) {
@@ -319,13 +317,13 @@ static DWORD WINAPI reader_thread(LPVOID arg)
                 break;
             }
         }
-        if (sock == INVALID_SOCKET) continue;
 
+        if (sock == INVALID_SOCKET) continue;
         if (!(sel > 0 && FD_ISSET(sock, &rfds))) continue;
 
         int room = (int)sizeof(stream) - stream_len - 1;
         if (room <= 0) { stream_len = 0; room = (int)sizeof(stream) - 1; }
-
+        
         int r = recv(sock, (char*)stream + stream_len, room, 0);
         if (r == 0) {
             close_reader_sock(&sock);
@@ -395,15 +393,13 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             stream_len = remain;
         }
     }
-
     close_reader_sock(&sock);
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/*  ICON                                                               */
+/*  ICON                                                              */
 /* ------------------------------------------------------------------ */
-
 typedef struct { int r,g,b; } Color;
 
 static Color lerp_color(Color a, Color b, float t) {
@@ -426,7 +422,6 @@ static Color vol_color(int dv) {
 static HICON create_icon(int vol_raw, RecvState state)
 {
     int dv = (state == STATE_ONLINE && vol_raw >= 0) ? VOL_RAW_TO_DV(vol_raw) : -1;
-
     Color bg;
     switch (state) {
         case STATE_OFFLINE:    bg = (Color){40, 40, 40}; break;
@@ -440,68 +435,68 @@ static HICON create_icon(int vol_raw, RecvState state)
     HBITMAP bmp  = CreateCompatibleBitmap(hdc, 16, 16);
     HBITMAP mask = CreateBitmap(16, 16, 1, 1, NULL);
     HBITMAP old  = SelectObject(mem, bmp);
-
     RECT rc = {0,0,16,16};
+    
     HBRUSH br = CreateSolidBrush(RGB(bg.r,bg.g,bg.b));
     FillRect(mem, &rc, br);
     DeleteObject(br);
 
     switch (state) {
-    case STATE_OFFLINE: {
-        HPEN pen = CreatePen(PS_SOLID, 2, RGB(180,40,40));
-        HPEN op  = SelectObject(mem, pen);
-        MoveToEx(mem, 3, 3, NULL); LineTo(mem, 13, 13);
-        MoveToEx(mem, 13, 3, NULL); LineTo(mem, 3, 13);
-        SelectObject(mem, op); DeleteObject(pen);
-        break;
-    }
-    case STATE_CONNECTING: {
-        HBRUSH db = CreateSolidBrush(RGB(120,120,220));
-        RECT d1={2,6,5,10}, d2={6,6,10,10}, d3={11,6,14,10};
-        FillRect(mem,&d1,db); FillRect(mem,&d2,db); FillRect(mem,&d3,db);
-        DeleteObject(db);
-        break;
-    }
-    case STATE_STANDBY: {
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(220,140,30));
-        HPEN op  = SelectObject(mem, pen);
-        SelectObject(mem, GetStockObject(NULL_BRUSH));
-        Ellipse(mem, 3, 4, 13, 14);
-        MoveToEx(mem, 8, 1, NULL); LineTo(mem, 8, 7);
-        SelectObject(mem, op); DeleteObject(pen);
-        break;
-    }
-    default: {
-        char txt[8];
-        if (dv < 0) strcpy_s(txt, sizeof(txt), "?");
-        else _snprintf_s(txt, sizeof(txt), _TRUNCATE, "%d", dv);
-
-        HFONT font = CreateFontA(-9,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,
-            DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,"Segoe UI");
-        HFONT oldf = SelectObject(mem, font);
-        SetBkMode(mem, TRANSPARENT);
-        int bright = bg.r*30 + bg.g*59 + bg.b*11;
-        SetTextColor(mem, (bright > 12000) ? RGB(20,20,20) : RGB(240,240,240));
-        DrawTextA(mem, txt, -1, &rc, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-        SelectObject(mem, oldf); DeleteObject(font);
-        break;
-    }
+        case STATE_OFFLINE: {
+            HPEN pen = CreatePen(PS_SOLID, 2, RGB(180,40,40));
+            HPEN op  = SelectObject(mem, pen);
+            MoveToEx(mem, 3, 3, NULL); LineTo(mem, 13, 13);
+            MoveToEx(mem, 13, 3, NULL); LineTo(mem, 3, 13);
+            SelectObject(mem, op); DeleteObject(pen);
+            break;
+        }
+        case STATE_CONNECTING: {
+            HBRUSH db = CreateSolidBrush(RGB(120,120,220));
+            RECT d1={2,6,5,10}, d2={6,6,10,10}, d3={11,6,14,10};
+            FillRect(mem,&d1,db); FillRect(mem,&d2,db); FillRect(mem,&d3,db);
+            DeleteObject(db);
+            break;
+        }
+        case STATE_STANDBY: {
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB(220,140,30));
+            HPEN op  = SelectObject(mem, pen);
+            SelectObject(mem, GetStockObject(NULL_BRUSH));
+            Ellipse(mem, 3, 4, 13, 14);
+            MoveToEx(mem, 8, 1, NULL); LineTo(mem, 8, 7);
+            SelectObject(mem, op); DeleteObject(pen);
+            break;
+        }
+        default: {
+            char txt[8];
+            if (dv < 0) strcpy_s(txt, sizeof(txt), "?");
+            else _snprintf_s(txt, sizeof(txt), _TRUNCATE, "%d", dv);
+            
+            HFONT font = CreateFontA(-9,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,
+                DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_SWISS,"Segoe UI");
+            HFONT oldf = SelectObject(mem, font);
+            SetBkMode(mem, TRANSPARENT);
+            int bright = bg.r*30 + bg.g*59 + bg.b*11;
+            SetTextColor(mem, (bright > 12000) ? RGB(20,20,20) : RGB(240,240,240));
+            DrawTextA(mem, txt, -1, &rc, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+            SelectObject(mem, oldf); DeleteObject(font);
+            break;
+        }
     }
 
     SelectObject(mem, old);
     ICONINFO ii = {0};
     ii.fIcon=TRUE; ii.hbmColor=bmp; ii.hbmMask=mask;
     HICON icon = CreateIconIndirect(&ii);
+    
     DeleteObject(bmp); DeleteObject(mask);
     DeleteDC(mem); ReleaseDC(NULL, hdc);
     return icon;
 }
 
 /* ------------------------------------------------------------------ */
-/*  TRAY globals                                                       */
+/*  TRAY globals                                                      */
 /* ------------------------------------------------------------------ */
-
 static NOTIFYICONDATAA g_nid;
 static HICON     g_icon;
 static int       g_vol_raw = -1;
@@ -509,19 +504,16 @@ static RecvState g_state   = STATE_OFFLINE;
 
 static void update_tray(void)
 {
-    int dv = (g_state == STATE_ONLINE && g_vol_raw >= 0)
-             ? VOL_RAW_TO_DV(g_vol_raw) : -1;
-
+    int dv = (g_state == STATE_ONLINE && g_vol_raw >= 0) ? VOL_RAW_TO_DV(g_vol_raw) : -1;
     switch (g_state) {
-    case STATE_OFFLINE:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: offline");       break;
-    case STATE_CONNECTING: strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting..."); break;
-    case STATE_STANDBY:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: standby");       break;
-    case STATE_ONLINE:
-        if (dv < 0) strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: ?");
-        else _snprintf_s(g_nid.szTip, sizeof(g_nid.szTip), _TRUNCATE, "Pioneer: %d", dv);
-        break;
+        case STATE_OFFLINE:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: offline");       break;
+        case STATE_CONNECTING: strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting..."); break;
+        case STATE_STANDBY:    strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: standby");       break;
+        case STATE_ONLINE:
+            if (dv < 0) strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: ?");
+            else _snprintf_s(g_nid.szTip, sizeof(g_nid.szTip), _TRUNCATE, "Pioneer: %d", dv);
+            break;
     }
-
     if (g_icon) DestroyIcon(g_icon);
     g_icon = create_icon(g_vol_raw, g_state);
     g_nid.hIcon = g_icon;
@@ -529,23 +521,8 @@ static void update_tray(void)
 }
 
 /* ------------------------------------------------------------------ */
-/*  VOLUME POPUP                                                       */
+/*  VOLUME POPUP                                                      */
 /* ------------------------------------------------------------------ */
-
-/*
- * Окно POPUP_W x POPUP_H.
- * Трек — вертикальная полоса по центру X, от TRACK_TOP до TRACK_BOT.
- * dv: 0..100, 100 = верх = громко.
- *
- * Фон — серый RGB(100,100,100) с прозрачностью 35% (alpha=166).
- * Используется WS_EX_LAYERED + SetLayeredWindowAttributes(LWA_ALPHA).
- *
- * Рывки устранены: сетевые обновления позиции игнорируются 700 мс
- * после последнего действия пользователя (колесо / drag).
- *
- * Позиция: над иконкой в трее (Shell_NotifyIconGetRect).
- */
-
 #define POPUP_W   36
 #define POPUP_H   180
 #define TRACK_X   (POPUP_W / 2)
@@ -554,8 +531,6 @@ static void update_tray(void)
 #define TRACK_LEN (TRACK_BOT - TRACK_TOP)
 #define THUMB_R   7
 
-/* Серый фон вместо тёмного — окно будет дополнительно сделано
-   полупрозрачным через SetLayeredWindowAttributes (alpha=166, ~65%). */
 #define COL_BG       RGB(100, 100, 100)
 #define COL_TRACK    RGB(160, 160, 160)
 #define COL_FILL     RGB(80,  140, 220)
@@ -567,7 +542,7 @@ static int       g_popup_dv    = 0;     /* 0..100 */
 static BOOL      g_popup_drag  = FALSE;
 static ULONGLONG g_popup_last_user = 0;
 static ULONGLONG g_popup_last_send = 0; /* throttle: последняя отправка MVL */
-#define POPUP_SEND_INTERVAL_MS 40        /* не чаще 25 команд/с при drag      */
+#define POPUP_SEND_INTERVAL_MS 40        /* не чаще 25 команд/с при drag */
 
 static int dv_to_y(int dv)
 {
@@ -585,17 +560,15 @@ static int y_to_dv(int y)
 static void popup_send_vol(int dv, BOOL force)
 {
     ULONGLONG now = GetTickCount64();
-    /* При drag пропускаем слишком частые команды; force=TRUE — при отпускании
-       кнопки, колёсике и клавишах, чтобы финальное значение всегда дошло. */
-    if (!force && g_popup_drag &&
-        (now - g_popup_last_send) < POPUP_SEND_INTERVAL_MS)
+    if (!force && g_popup_drag && (now - g_popup_last_send) < POPUP_SEND_INTERVAL_MS)
         return;
-
+    
     int raw = dv * 2;
     if (raw > 200) raw = 200;
     char cmd[CMD_MAXLEN];
     _snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "!1MVL%02X", raw);
     enqueue_cmd(cmd);
+    
     g_popup_last_send = now;
     g_popup_last_user = now;
 }
@@ -606,6 +579,7 @@ static void popup_net_update(int dv)
     if (g_popup_drag)  return;
     if (GetTickCount64() - g_popup_last_user < 700) return;
     if (dv == g_popup_dv) return;
+    
     g_popup_dv = dv;
     InvalidateRect(g_popup_hwnd, NULL, FALSE);
 }
@@ -614,31 +588,27 @@ static void popup_paint(HWND hwnd)
 {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
-
-    HDC     mem = CreateCompatibleDC(hdc);
+    HDC mem = CreateCompatibleDC(hdc);
     HBITMAP bmp = CreateCompatibleBitmap(hdc, POPUP_W, POPUP_H);
     HBITMAP old = SelectObject(mem, bmp);
-
     RECT rcAll = {0, 0, POPUP_W, POPUP_H};
+    
     HBRUSH hbg = CreateSolidBrush(COL_BG);
     FillRect(mem, &rcAll, hbg);
     DeleteObject(hbg);
 
     int ty = dv_to_y(g_popup_dv);
-
-    /* Серая часть трека (выше бегунка) */
+    
     HBRUSH hbt = CreateSolidBrush(COL_TRACK);
     RECT rt = {TRACK_X-2, TRACK_TOP, TRACK_X+3, ty};
     FillRect(mem, &rt, hbt);
     DeleteObject(hbt);
 
-    /* Синяя часть (ниже бегунка — заполнение громкости) */
     HBRUSH hbf = CreateSolidBrush(COL_FILL);
     RECT rf = {TRACK_X-2, ty, TRACK_X+3, TRACK_BOT};
     FillRect(mem, &rf, hbf);
     DeleteObject(hbf);
 
-    /* Бегунок — белый круг */
     HBRUSH hbth = CreateSolidBrush(g_popup_drag ? COL_THUMB_HL : COL_THUMB);
     SelectObject(mem, hbth);
     SelectObject(mem, GetStockObject(NULL_PEN));
@@ -646,6 +616,7 @@ static void popup_paint(HWND hwnd)
     DeleteObject(hbth);
 
     BitBlt(hdc, 0, 0, POPUP_W, POPUP_H, mem, 0, 0, SRCCOPY);
+    
     SelectObject(mem, old);
     DeleteObject(bmp);
     DeleteDC(mem);
@@ -655,85 +626,83 @@ static void popup_paint(HWND hwnd)
 static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
-
-    case WM_PAINT:
-        popup_paint(hwnd);
-        return 0;
-
-    case WM_ERASEBKGND:
-        return 1;
-
-    case WM_LBUTTONDOWN: {
-        int my = (short)HIWORD(lp);
-        g_popup_drag = TRUE;
-        SetCapture(hwnd);
-        int dv = y_to_dv(my);
-        g_popup_dv = dv;
-        popup_send_vol(dv, FALSE);
-        InvalidateRect(hwnd, NULL, FALSE);
-        return 0;
-    }
-
-    case WM_MOUSEMOVE: {
-        if (!g_popup_drag) return 0;
-        int my = (short)HIWORD(lp);
-        int dv = y_to_dv(my);
-        if (dv != g_popup_dv) {
+        case WM_PAINT:
+            popup_paint(hwnd);
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_LBUTTONDOWN: {
+            int my = (short)HIWORD(lp);
+            g_popup_drag = TRUE;
+            SetCapture(hwnd);
+            int dv = y_to_dv(my);
             g_popup_dv = dv;
             popup_send_vol(dv, FALSE);
             InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
         }
-        return 0;
-    }
-
-    case WM_LBUTTONUP:
-        if (g_popup_drag) {
+        case WM_MOUSEMOVE: {
+            if (!g_popup_drag) return 0;
+            int my = (short)HIWORD(lp);
+            int dv = y_to_dv(my);
+            if (dv != g_popup_dv) {
+                g_popup_dv = dv;
+                popup_send_vol(dv, FALSE);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP:
+            if (g_popup_drag) {
+                g_popup_drag = FALSE;
+                ReleaseCapture();
+                popup_send_vol(g_popup_dv, TRUE);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(wp);
+            int steps = delta / WHEEL_DELTA;
+            if (steps == 0) steps = (delta > 0) ? 1 : -1;
+            
+            const char *cmd = (steps > 0) ? "!1MVLUP" : "!1MVLDOWN";
+            int abs_steps = steps < 0 ? -steps : steps;
+            for (int i = 0; i < abs_steps; i++)
+                enqueue_cmd(cmd);
+            
+            g_popup_last_user = GetTickCount64();
+            int new_raw = g_popup_dv * 2 + steps;
+            if (new_raw < 0)   new_raw = 0;
+            if (new_raw > 200) new_raw = 200;
+            int new_dv = VOL_RAW_TO_DV(new_raw);
+            
+            if (new_dv != g_popup_dv) {
+                g_popup_dv = new_dv;
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+            if (wp == VK_UP || wp == VK_RIGHT) {
+                int dv = g_popup_dv + 1; if (dv > 100) dv = 100;
+                g_popup_dv = dv; popup_send_vol(dv, TRUE);
+                InvalidateRect(hwnd, NULL, FALSE); return 0;
+            }
+            if (wp == VK_DOWN || wp == VK_LEFT) {
+                int dv = g_popup_dv - 1; if (dv < 0) dv = 0;
+                g_popup_dv = dv; popup_send_vol(dv, TRUE);
+                InvalidateRect(hwnd, NULL, FALSE); return 0;
+            }
+            break;
+        case WM_ACTIVATE:
+            if (LOWORD(wp) == WA_INACTIVE) DestroyWindow(hwnd);
+            return 0;
+        case WM_DESTROY:
+            g_popup_hwnd = NULL;
             g_popup_drag = FALSE;
-            ReleaseCapture();
-            popup_send_vol(g_popup_dv, TRUE); /* финальная позиция — всегда отправляем */
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return 0;
-
-    case WM_MOUSEWHEEL: {
-        int delta = GET_WHEEL_DELTA_WPARAM(wp);
-        int steps = delta / WHEEL_DELTA;
-        if (steps == 0) steps = (delta > 0) ? 1 : -1;
-        int dv = g_popup_dv + steps;
-        if (dv < 0)   dv = 0;
-        if (dv > 100) dv = 100;
-        if (dv != g_popup_dv) {
-            g_popup_dv = dv;
-            popup_send_vol(dv, TRUE);
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return 0;
+            return 0;
     }
-
-    case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
-        if (wp == VK_UP || wp == VK_RIGHT) {
-            int dv = g_popup_dv + 1; if (dv > 100) dv = 100;
-            g_popup_dv = dv; popup_send_vol(dv, TRUE);
-            InvalidateRect(hwnd, NULL, FALSE); return 0;
-        }
-        if (wp == VK_DOWN || wp == VK_LEFT) {
-            int dv = g_popup_dv - 1; if (dv < 0) dv = 0;
-            g_popup_dv = dv; popup_send_vol(dv, TRUE);
-            InvalidateRect(hwnd, NULL, FALSE); return 0;
-        }
-        break;
-
-    case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE) DestroyWindow(hwnd);
-        return 0;
-
-    case WM_DESTROY:
-        g_popup_hwnd = NULL;
-        g_popup_drag = FALSE;
-        return 0;
-    }
-
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
@@ -744,7 +713,6 @@ static void create_volume_popup(void)
         return;
     }
 
-    /* Получаем точный прямоугольник иконки через Shell_NotifyIconGetRect */
     RECT icon_rc = {0};
     BOOL got_icon_rc = FALSE;
     {
@@ -764,9 +732,7 @@ static void create_volume_popup(void)
 
     RECT work = {0};
     SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
-
     int x, y;
-
     if (got_icon_rc) {
         int icx = (icon_rc.left + icon_rc.right) / 2;
         x = icx - POPUP_W / 2;
@@ -777,7 +743,6 @@ static void create_volume_popup(void)
         y = work.bottom - POPUP_H - 4;
     }
 
-    /* Не выходим за рабочую область */
     if (x < work.left)             x = work.left;
     if (x + POPUP_W > work.right)  x = work.right  - POPUP_W;
     if (y < work.top)              y = work.top;
@@ -794,13 +759,11 @@ static void create_volume_popup(void)
         registered = TRUE;
     }
 
-    g_popup_dv        = (g_state == STATE_ONLINE && g_vol_raw >= 0)
-                        ? VOL_RAW_TO_DV(g_vol_raw) : 0;
+    g_popup_dv        = (g_state == STATE_ONLINE && g_vol_raw >= 0) ? VOL_RAW_TO_DV(g_vol_raw) : 0;
     g_popup_drag      = FALSE;
     g_popup_last_user = 0;
     g_popup_last_send = 0;
 
-    /* WS_EX_LAYERED добавлен для поддержки полупрозрачности */
     g_popup_hwnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         "PioneerVolPopup", "",
@@ -811,192 +774,214 @@ static void create_volume_popup(void)
         NULL);
 
     if (!g_popup_hwnd) return;
-
-    /* Прозрачность 35%: alpha = round(255 * 0.65) = 166 */
+    
     SetLayeredWindowAttributes(g_popup_hwnd, 0, 166, LWA_ALPHA);
-
     ShowWindow(g_popup_hwnd, SW_SHOWNA);
     SetForegroundWindow(g_popup_hwnd);
     SetFocus(g_popup_hwnd);
 }
 
 /* ------------------------------------------------------------------ */
-/*  WINDOW PROC                                                        */
+/*  WINDOW PROC                                                       */
 /* ------------------------------------------------------------------ */
-
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+        case WM_CREATE: {
+            WSADATA wsa;
+            if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
+                OutputDebugStringA("pioneer_tray: WSAStartup failed\n");
+                return -1;
+            }
+            InitializeCriticalSection(&g_cmd_cs);
+            InitializeCriticalSection(&g_shutdown_sock_cs);
+            
+            g_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+            if (!g_stop_event) {
+                OutputDebugStringA("pioneer_tray: CreateEventA failed\n");
+                return -1;
+            }
 
-    case WM_CREATE: {
-        WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
-            OutputDebugStringA("pioneer_tray: WSAStartup failed\n");
-            return -1;
+            if (!RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C)) OutputDebugStringA("Hotkey F13 failed\n");
+            if (!RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D)) OutputDebugStringA("Hotkey F14 failed\n");
+
+            memset(&g_nid, 0, sizeof(g_nid));
+            g_nid.cbSize           = sizeof(g_nid);
+            g_nid.hWnd             = hwnd;
+            g_nid.uID              = 1;
+            g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+            g_nid.uCallbackMessage = WM_TRAY_ICON;
+            
+            g_icon = create_icon(-1, STATE_OFFLINE);
+            g_nid.hIcon = g_icon;
+            strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting...");
+            
+            if (!Shell_NotifyIconA(NIM_ADD, &g_nid)) OutputDebugStringA("Shell_NotifyIconA(NIM_ADD) failed\n");
+
+            g_thread = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
+            if (!g_thread) {
+                OutputDebugStringA("pioneer_tray: CreateThread failed\n");
+                DestroyWindow(hwnd);
+            }
+            return 0;
         }
-        InitializeCriticalSection(&g_cmd_cs);
-        InitializeCriticalSection(&g_shutdown_sock_cs);
 
-        g_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
-        if (!g_stop_event) {
-            OutputDebugStringA("pioneer_tray: CreateEventA failed\n");
-            return -1;
+        case WM_SET_STATE: {
+            if (is_shutting_down()) return 0;
+            RecvState new_state = (RecvState)(int)wp;
+            int new_vol = (int)lp;
+            
+            if (new_state == g_state && (new_state != STATE_ONLINE || new_vol == g_vol_raw))
+                return 0;
+                
+            g_state = new_state;
+            if (new_state == STATE_ONLINE && new_vol >= 0)
+                g_vol_raw = new_vol;
+            else
+                g_vol_raw = -1;
+                
+            if (g_state == STATE_ONLINE && g_vol_raw >= 0)
+                popup_net_update(VOL_RAW_TO_DV(g_vol_raw));
+                
+            update_tray();
+            return 0;
         }
 
-        if (!RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C)) OutputDebugStringA("Hotkey F13 failed\n");
-        if (!RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D)) OutputDebugStringA("Hotkey F14 failed\n");
-
-        memset(&g_nid, 0, sizeof(g_nid));
-        g_nid.cbSize           = sizeof(g_nid);
-        g_nid.hWnd             = hwnd;
-        g_nid.uID              = 1;
-        g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-        g_nid.uCallbackMessage = WM_TRAY_ICON;
-        g_icon = create_icon(-1, STATE_OFFLINE);
-        g_nid.hIcon = g_icon;
-        strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting...");
-        if (!Shell_NotifyIconA(NIM_ADD, &g_nid)) OutputDebugStringA("Shell_NotifyIconA(NIM_ADD) failed\n");
-
-        g_thread = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
-        if (!g_thread) {
-            OutputDebugStringA("pioneer_tray: CreateThread failed\n");
-            DestroyWindow(hwnd);
-        }
-        return 0;
-    }
-
-    case WM_SET_STATE: {
-        if (is_shutting_down()) return 0;
-
-        RecvState new_state = (RecvState)(int)wp;
-        int new_vol = (int)lp;
-
-        if (new_state == g_state &&
-            (new_state != STATE_ONLINE || new_vol == g_vol_raw))
+        case WM_HOTKEY:
+            if (!is_shutting_down() && g_state == STATE_ONLINE) {
+                if (wp == HOTKEY_VOL_DN) enqueue_cmd("!1MVLDOWN");
+                if (wp == HOTKEY_VOL_UP) enqueue_cmd("!1MVLUP");
+            }
             return 0;
 
-        g_state = new_state;
-        if (new_state == STATE_ONLINE && new_vol >= 0)
-            g_vol_raw = new_vol;
-        else
-            g_vol_raw = -1;
+        case WM_TRAY_ICON:
+            if (LOWORD(lp) == WM_LBUTTONUP) {
+                if (!is_shutting_down() && g_state == STATE_ONLINE)
+                    create_volume_popup();
+            }
+            if (LOWORD(lp) == WM_RBUTTONUP) {
+                POINT pt; GetCursorPos(&pt);
+                HMENU m = CreatePopupMenu();
+                
+                if (g_state == STATE_STANDBY) {
+                    AppendMenuA(m, MF_STRING, IDM_POWER, "Power On");
+                } else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING) {
+                    AppendMenuA(m, MF_STRING, IDM_POWER, "Standby");
+                } else {
+                    AppendMenuA(m, MF_GRAYED | MF_STRING, IDM_POWER, "Power");
+                }
+                
+                /* Меню выбора источника (активно только в состоянии ONLINE) */
+                if (g_state == STATE_ONLINE) {
+                    HMENU srcMenu = CreatePopupMenu();
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_HDMI5, "HDMI 5");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_HDMI6, "HDMI 6");
+                    AppendMenuA(srcMenu, MF_SEPARATOR, 0, NULL);
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_BD, "BD/DVD");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_CBL, "CBL/SAT");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_STRM, "STRM BOX");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_TV, "TV");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_GAME, "GAME");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_CD, "CD");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_USB, "USB");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_BT, "BLUETOOTH");
+                    AppendMenuA(srcMenu, MF_STRING, IDM_SRC_NET, "NET");
+                    
+                    AppendMenuA(m, MF_POPUP, (UINT_PTR)srcMenu, "Source");
+                } else {
+                    AppendMenuA(m, MF_GRAYED | MF_STRING, 0, "Source");
+                }
+                
+                AppendMenuA(m, MF_SEPARATOR, 0, NULL);
+                AppendMenuA(m, MF_STRING, IDM_EXIT, "Exit");
+                
+                SetForegroundWindow(hwnd);
+                TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+                DestroyMenu(m);
+            }
+            return 0;
 
-        if (g_state == STATE_ONLINE && g_vol_raw >= 0)
-            popup_net_update(VOL_RAW_TO_DV(g_vol_raw));
+        case WM_COMMAND:
+            if (!is_shutting_down()) {
+                if (LOWORD(wp) == IDM_POWER) {
+                    if (g_state == STATE_STANDBY)
+                        enqueue_cmd("!1PWR01");
+                    else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
+                        enqueue_cmd("!1PWR00");
+                }
+                
+                /* Обработка команд выбора источника (Input Selector SLI) */
+                if (LOWORD(wp) == IDM_SRC_HDMI5) enqueue_cmd("!1SLI55");
+                if (LOWORD(wp) == IDM_SRC_HDMI6) enqueue_cmd("!1SLI56");
+                if (LOWORD(wp) == IDM_SRC_BD)    enqueue_cmd("!1SLI10");
+                if (LOWORD(wp) == IDM_SRC_CBL)   enqueue_cmd("!1SLI01");
+                if (LOWORD(wp) == IDM_SRC_STRM)  enqueue_cmd("!1SLI2F");
+                if (LOWORD(wp) == IDM_SRC_TV)    enqueue_cmd("!1SLI12");
+                if (LOWORD(wp) == IDM_SRC_GAME)  enqueue_cmd("!1SLI02");
+                if (LOWORD(wp) == IDM_SRC_CD)    enqueue_cmd("!1SLI23");
+                if (LOWORD(wp) == IDM_SRC_USB)   enqueue_cmd("!1SLI29");
+                if (LOWORD(wp) == IDM_SRC_BT)    enqueue_cmd("!1SLI2E");
+                if (LOWORD(wp) == IDM_SRC_NET)   enqueue_cmd("!1SLI2B");
+                
+                if (LOWORD(wp) == IDM_EXIT)
+                    DestroyWindow(hwnd);
+            }
+            return 0;
 
-        update_tray();
-        return 0;
-    }
-
-    case WM_HOTKEY:
-        if (!is_shutting_down() && g_state == STATE_ONLINE) {
-            if (wp == HOTKEY_VOL_DN) enqueue_cmd("!1MVLDOWN");
-            if (wp == HOTKEY_VOL_UP) enqueue_cmd("!1MVLUP");
-        }
-        return 0;
-
-    case WM_TRAY_ICON:
-        if (LOWORD(lp) == WM_LBUTTONUP) {
-            if (!is_shutting_down() && g_state == STATE_ONLINE)
-                create_volume_popup();
-        }
-        if (LOWORD(lp) == WM_RBUTTONUP) {
-            POINT pt; GetCursorPos(&pt);
-            HMENU m = CreatePopupMenu();
-
-            if (g_state == STATE_STANDBY) {
-                AppendMenuA(m, MF_STRING, IDM_POWER, "Power On");
-            } else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING) {
-                AppendMenuA(m, MF_STRING, IDM_POWER, "Standby");
+        case WM_DESTROY:
+            begin_shutdown();
+            if (g_popup_hwnd) {
+                DestroyWindow(g_popup_hwnd);
+                g_popup_hwnd = NULL;
+            }
+            UnregisterHotKey(hwnd, HOTKEY_VOL_DN);
+            UnregisterHotKey(hwnd, HOTKEY_VOL_UP);
+            Shell_NotifyIconA(NIM_DELETE, &g_nid);
+            
+            if (g_icon) { DestroyIcon(g_icon); g_icon = NULL; }
+            
+            SetEvent(g_stop_event);
+            sock_shutdown();
+            
+            if (g_thread) {
+                DWORD wr = WaitForSingleObject(g_thread, 5000);
+                if (wr == WAIT_OBJECT_0) {
+                    CloseHandle(g_thread);
+                    g_thread = NULL;
+                    CloseHandle(g_stop_event);
+                    DeleteCriticalSection(&g_cmd_cs);
+                    DeleteCriticalSection(&g_shutdown_sock_cs);
+                    WSACleanup();
+                } else {
+                    OutputDebugStringA("pioneer_tray: reader thread didn't stop in time, leaking resources\n");
+                }
             } else {
-                AppendMenuA(m, MF_GRAYED | MF_STRING, IDM_POWER, "Power");
-            }
-
-            AppendMenuA(m, MF_SEPARATOR, 0, NULL);
-            AppendMenuA(m, MF_STRING, IDM_REFRESH, "Refresh");
-            AppendMenuA(m, MF_STRING, IDM_EXIT,    "Exit");
-
-            SetForegroundWindow(hwnd);
-            TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
-            DestroyMenu(m);
-        }
-        return 0;
-
-    case WM_COMMAND:
-        if (!is_shutting_down()) {
-            if (LOWORD(wp) == IDM_POWER) {
-                if (g_state == STATE_STANDBY)
-                    enqueue_cmd("!1PWR01");
-                else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
-                    enqueue_cmd("!1PWR00");
-            }
-            if (LOWORD(wp) == IDM_REFRESH)
-                enqueue_cmd("!1PWRQSTN");
-            if (LOWORD(wp) == IDM_EXIT)
-                DestroyWindow(hwnd);
-        }
-        return 0;
-
-    case WM_DESTROY:
-        begin_shutdown();
-
-        if (g_popup_hwnd) {
-            DestroyWindow(g_popup_hwnd);
-            g_popup_hwnd = NULL;
-        }
-
-        UnregisterHotKey(hwnd, HOTKEY_VOL_DN);
-        UnregisterHotKey(hwnd, HOTKEY_VOL_UP);
-        Shell_NotifyIconA(NIM_DELETE, &g_nid);
-        if (g_icon) { DestroyIcon(g_icon); g_icon = NULL; }
-
-        SetEvent(g_stop_event);
-        sock_shutdown();
-
-        if (g_thread) {
-            DWORD wr = WaitForSingleObject(g_thread, 5000);
-            if (wr == WAIT_OBJECT_0) {
-                CloseHandle(g_thread);
-                g_thread = NULL;
                 CloseHandle(g_stop_event);
                 DeleteCriticalSection(&g_cmd_cs);
                 DeleteCriticalSection(&g_shutdown_sock_cs);
                 WSACleanup();
-            } else {
-                /* Поток не завершился — не трогаем его ресурсы во избежание UB.
-                   ОС освободит всё при завершении процесса. */
-                OutputDebugStringA("pioneer_tray: reader thread didn't stop in time, leaking resources\n");
             }
-        } else {
-            CloseHandle(g_stop_event);
-            DeleteCriticalSection(&g_cmd_cs);
-            DeleteCriticalSection(&g_shutdown_sock_cs);
-            WSACleanup();
-        }
-
-        PostQuitMessage(0);
-        return 0;
+            PostQuitMessage(0);
+            return 0;
     }
-
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
 /* ------------------------------------------------------------------ */
-/*  MAIN                                                               */
+/*  MAIN                                                              */
 /* ------------------------------------------------------------------ */
-
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
 {
     (void)hPrev; (void)lpCmd; (void)nShow;
-
+    
     WNDCLASSA wc = {0};
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
     wc.lpszClassName = "ISCPT";
     RegisterClassA(&wc);
-
+    
     g_hwnd = CreateWindowA("ISCPT","",0, 0,0,0,0, HWND_MESSAGE, NULL, hInst, NULL);
-
+    
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
