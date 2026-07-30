@@ -4,14 +4,17 @@ Protocol: eISCP over TCP
 */
 #define WIN32_LEAN_AND_MEAN
 #define _WIN32_WINNT 0x0600
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <process.h>   /* Для _beginthreadex */
 #include <stdio.h>
 #include <stdint.h>
 #include <ctype.h>
 #include <string.h>
+
 #pragma comment(lib, "ws2_32.lib")
 
 #define DEVICE_IP    "192.168.1.53"
@@ -23,7 +26,7 @@ Protocol: eISCP over TCP
 #define IDM_EXIT      1001
 #define IDM_POWER     1003
 
-/* Source selection IDs (start from 2000 to avoid WM_USER collisions) */
+/* Source selection IDs */
 #define IDM_SRC_HDMI5 2010
 #define IDM_SRC_HDMI6 2011
 #define IDM_SRC_BD    2012
@@ -225,7 +228,8 @@ static void post_state(RecvState st, int vol)
         PostMessageA(g_hwnd, WM_SET_STATE, (WPARAM)st, (LPARAM)vol);
 }
 
-static DWORD WINAPI reader_thread(LPVOID arg)
+/* Сигнатура изменена для _beginthreadex */
+static unsigned __stdcall reader_thread(void *arg)
 {
     (void)arg;
     unsigned char stream[8192];
@@ -248,7 +252,14 @@ static DWORD WINAPI reader_thread(LPVOID arg)
             struct sockaddr_in addr = {0};
             addr.sin_family = AF_INET;
             addr.sin_port   = htons(DEVICE_PORT);
-            InetPtonA(AF_INET, DEVICE_IP, &addr.sin_addr);
+            
+            /* Проверка результата InetPtonA */
+            if (InetPtonA(AF_INET, DEVICE_IP, &addr.sin_addr) != 1) {
+                closesocket(s);
+                post_state(STATE_OFFLINE, -1);
+                WaitForSingleObject(g_stop_event, 2000);
+                continue;
+            }
             
             int rc = connect(s, (struct sockaddr*)&addr, sizeof(addr));
             if (rc == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
@@ -542,8 +553,8 @@ static HWND      g_popup_hwnd  = NULL;
 static int       g_popup_dv    = 0;     /* 0..100 */
 static BOOL      g_popup_drag  = FALSE;
 static ULONGLONG g_popup_last_user = 0;
-static ULONGLONG g_popup_last_send = 0; /* throttle: последняя отправка MVL */
-#define POPUP_SEND_INTERVAL_MS 40       /* не чаще 25 команд/с при drag */
+static ULONGLONG g_popup_last_send = 0; 
+#define POPUP_SEND_INTERVAL_MS 40       
 
 static int dv_to_y(int dv)
 {
@@ -666,15 +677,14 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             int steps = delta / WHEEL_DELTA;
             if (steps == 0) steps = (delta > 0) ? 1 : -1;
             
-            /* Изменяем сразу визуальное значение dv на количество шагов */
+            /* Исправленный алгоритм: сдвигаем dv на 1 шаг за щелчок, отправляем абсолютное значение */
             int new_dv = g_popup_dv + steps;
             if (new_dv < 0) new_dv = 0;
             if (new_dv > 100) new_dv = 100;
             
-            /* Если значение изменилось, обновляем UI и шлем абсолютную команду */
             if (new_dv != g_popup_dv) {
                 g_popup_dv = new_dv;
-                popup_send_vol(new_dv, TRUE); /* TRUE игнорирует троттлинг для мгновенной реакции */
+                popup_send_vol(new_dv, TRUE); 
                 InvalidateRect(hwnd, NULL, FALSE);
             }
             return 0;
@@ -752,7 +762,12 @@ static void create_volume_popup(void)
         wc.hInstance     = (HINSTANCE)GetWindowLongPtrA(g_hwnd, GWLP_HINSTANCE);
         wc.hbrBackground = NULL;
         wc.lpszClassName = "PioneerVolPopup";
-        RegisterClassA(&wc);
+        
+        /* Проверка регистрации класса popup */
+        if (!RegisterClassA(&wc)) {
+            OutputDebugStringA("pioneer_tray: RegisterClassA for popup failed\n");
+            return;
+        }
         registered = TRUE;
     }
     
@@ -789,13 +804,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 OutputDebugStringA("pioneer_tray: WSAStartup failed\n");
                 return -1;
             }
-            InitializeCriticalSection(&g_cmd_cs);
-            InitializeCriticalSection(&g_shutdown_sock_cs);
+            
+            /* Создаем событие ДО инициализации критических секций.
+               Если CreateEventA упадет, нам достаточно сделать только WSACleanup. */
             g_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
             if (!g_stop_event) {
                 OutputDebugStringA("pioneer_tray: CreateEventA failed\n");
+                WSACleanup();
                 return -1;
             }
+            
+            InitializeCriticalSection(&g_cmd_cs);
+            InitializeCriticalSection(&g_shutdown_sock_cs);
+            
             if (!RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C)) OutputDebugStringA("Hotkey F13 failed\n");
             if (!RegisterHotKey(hwnd, HOTKEY_VOL_UP, 0, 0x7D)) OutputDebugStringA("Hotkey F14 failed\n");
             
@@ -810,9 +831,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting...");
             if (!Shell_NotifyIconA(NIM_ADD, &g_nid)) OutputDebugStringA("Shell_NotifyIconA(NIM_ADD) failed\n");
             
-            g_thread = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
+            g_thread = (HANDLE)_beginthreadex(NULL, 0, reader_thread, NULL, 0, NULL);
             if (!g_thread) {
-                OutputDebugStringA("pioneer_tray: CreateThread failed\n");
+                OutputDebugStringA("pioneer_tray: _beginthreadex failed\n");
                 DestroyWindow(hwnd);
             }
             return 0;
@@ -857,7 +878,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     AppendMenuA(m, MF_GRAYED | MF_STRING, IDM_POWER, "Power");
                 }
                 
-                /* Меню выбора источника (доступно только в состоянии ONLINE) */
                 if (g_state == STATE_ONLINE) {
                     HMENU srcMenu = CreatePopupMenu();
                     AppendMenuA(srcMenu, MF_STRING, IDM_SRC_HDMI5, "HDMI 5");
@@ -893,7 +913,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
                         enqueue_cmd("!1PWR00");
                 }
-                /* Обработка команд выбора источника (Input Selector SLI) */
                 if (LOWORD(wp) == IDM_SRC_HDMI5) enqueue_cmd("!1SLI55");
                 if (LOWORD(wp) == IDM_SRC_HDMI6) enqueue_cmd("!1SLI56");
                 if (LOWORD(wp) == IDM_SRC_BD)    enqueue_cmd("!1SLI10");
@@ -957,9 +976,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
     wc.lpszClassName = "ISCPT";
-    RegisterClassA(&wc);
+    
+    /* Проверка регистрации главного класса */
+    if (!RegisterClassA(&wc)) {
+        OutputDebugStringA("pioneer_tray: RegisterClassA failed\n");
+        return 0;
+    }
     
     g_hwnd = CreateWindowA("ISCPT","",0, 0,0,0,0, HWND_MESSAGE, NULL, hInst, NULL);
+    if (!g_hwnd) {
+        OutputDebugStringA("pioneer_tray: CreateWindowA failed\n");
+        return 0;
+    }
     
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0)) {
