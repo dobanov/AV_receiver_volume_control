@@ -1,53 +1,105 @@
-Receiver Tray Volume Controller
+# Pioneer AVR Tray Controller
 
-Небольшое WinAPI-приложение для управления громкостью сетевого AV-ресивера через UPnP (SOAP).
-Работает из системного трея и управляется горячими клавишами.
+A lightweight Windows tray application for controlling a Pioneer AV receiver over the network using the **eISCP (Ethernet Integra Serial Control Protocol)**.
 
-Возможности
+The application lives in the system tray, automatically connects to the receiver, displays the current volume, and provides quick access to power and input controls.
 
-  Управление громкостью ресивера по сети (UPnP / SOAP)
-  Горячие клавиши:
-F13 — уменьшить громкость
-F14 — увеличить громкость
+## Features
 
-  Отображение текущей громкости в трее
-  Динамическая цветная иконка:
+* Automatic connection and reconnection to the AVR
+* Real-time volume display in the system tray icon
+* Color-coded tray icon indicating receiver state
+* Volume popup with mouse drag and wheel support
+* Global hotkeys (F13/F14) for volume control
+* Power On / Standby control
+* Input source selection
+* Lightweight native Win32 application
+* No external dependencies
 
-тихо → светло-голубой
-средне → синий / зелёный
-громко → жёлтый / оранжевый / красный
+## Receiver States
 
-  Автообновление громкости
+| State      | Description                                    |
+| ---------- | ---------------------------------------------- |
+| Offline    | Receiver is unreachable                        |
+| Connecting | Connection established or waiting for status   |
+| Standby    | Receiver is powered off                        |
+| Online     | Receiver is powered on and volume is displayed |
 
-  Сборка
+## Controls
 
-Пример для MSYS2 (UCRT64):
+### Tray Icon
 
-soap version
+* **Left Click** – Open volume popup
+* **Right Click** – Open context menu
 
-gcc -O2 -mwindows receiver_tray.c -o receiver_tray.exe -lwininet -lshell32 -luser32 -lgdi32
+### Volume Popup
 
-eISCP version
+* Drag the slider
+* Mouse wheel adjusts volume
+* Arrow keys adjust volume
+* **Esc** closes the popup
 
+### Global Hotkeys
 
-gcc -Os -mwindows receiver_tray_iscp.c -o receiver_tray_iscp.exe 
-  -lws2_32 -lshell32 -luser32 -lgdi32 -s -fno-exceptions 
-  -fno-unwind-tables -fno-asynchronous-unwind-tables  -fomit-frame-pointer 
-  -falign-functions=1 -falign-jumps=1 -falign-loops=1 -falign-labels=1 -lcomctl32
+| Key | Action      |
+| --- | ----------- |
+| F13 | Volume Down |
+| F14 | Volume Up   |
 
+## Configuration
 
-Настройка
+Edit the following constants in the source code:
 
-Отредактируй параметры в коде:
-
+```c
 #define DEVICE_IP   "192.168.1.53"
-#define DEVICE_PORT 8888
-#define CONTROL_URL "/Control/oap/RenderingControl"
+#define DEVICE_PORT 60128
+```
 
- Эти значения зависят от модели ресивера.
+The default eISCP port is **60128**.
 
- Работа протестирована с pioneer VSX-LX503
+## Building
 
- Лицензия
+The project is intended to be built with **MSYS2 (UCRT64)** using the MinGW-w64 GCC toolchain.
 
-Свободное использование без ограничений.
+### Prerequisites
+
+Install the UCRT64 environment and required packages:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc
+```
+
+Open the **MSYS2 UCRT64** shell and compile:
+
+```sh
+gcc -Os -mwindows receiver_tray_iscp.c -o receiver_tray_iscp.exe ^
+    -lws2_32 -lshell32 -luser32 -lgdi32 -lcomctl32 ^
+    -s -fno-exceptions -fno-unwind-tables ^
+    -fno-asynchronous-unwind-tables -fomit-frame-pointer ^
+    -falign-functions=1 -falign-jumps=1 ^
+    -falign-loops=1 -falign-labels=1
+```
+
+Or as a single command:
+
+```sh
+gcc -Os -mwindows receiver_tray_iscp.c -o receiver_tray_iscp.exe -lws2_32 -lshell32 -luser32 -lgdi32 -lcomctl32 -s -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -fomit-frame-pointer -falign-functions=1 -falign-jumps=1 -falign-loops=1 -falign-labels=1
+```
+
+The resulting executable is a small native Win32 application with no external runtime dependencies beyond the standard Windows system libraries.
+
+
+## Implementation Notes
+
+* Uses native Win32 API only.
+* Uses Winsock2 for TCP communication.
+* Implements the Pioneer eISCP protocol.
+* Dedicated worker thread for network I/O.
+* Handles partial TCP packets and stream resynchronization.
+* Automatic reconnection after connection loss.
+* Graceful shutdown using an event and socket shutdown.
+* Thread-safe command queue.
+
+## License
+
+Released under the MIT License.
