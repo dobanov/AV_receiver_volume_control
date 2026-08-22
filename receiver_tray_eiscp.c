@@ -167,8 +167,24 @@ static void close_reader_sock(SOCKET *psock)
 
     if (s != INVALID_SOCKET) {
         *psock = INVALID_SOCKET;
+
+        /* Clear the shared shutdown-socket copy and close the real socket
+           as one atomic step under g_shutdown_sock_cs (CRITICAL_SECTION is
+           reentrant for the same thread, so nesting with sock_set() below
+           is safe). This closes two possible races at once:
+           - clear-then-close (old code): sock_shutdown() running in the gap
+             sees INVALID_SOCKET and silently skips shutdown() on a socket
+             that is, at that instant, still open.
+           - close-then-clear: sock_shutdown() running in the gap could call
+             shutdown() on a handle value that was already closed and may
+             have been reused by the OS for an unrelated socket elsewhere.
+           Holding the lock across both steps means sock_shutdown() always
+           either fully completes before this function's close, or fully
+           runs after it (and then correctly sees INVALID_SOCKET). */
+        EnterCriticalSection(&g_shutdown_sock_cs);
         sock_set(INVALID_SOCKET);
         closesocket(s);
+        LeaveCriticalSection(&g_shutdown_sock_cs);
     }
 }
 
@@ -626,6 +642,20 @@ static HICON create_icon(int vol_raw, RecvState state)
 
     HBITMAP bmp = CreateCompatibleBitmap(hdc, 16, 16);
     HBITMAP mask = CreateBitmap(16, 16, 1, 1, NULL);
+
+    /* CreateBitmap() with lpvBits == NULL leaves the bitmap's contents
+       undefined. Since 'mask' is used as the icon's AND-mask, garbage bits
+       here can make random pixels of the tray icon render as transparent.
+       Explicitly clear it to all-zero (0 = opaque for an AND-mask) before use. */
+    {
+        HDC maskDC = CreateCompatibleDC(NULL);
+        HBITMAP oldMaskBmp = SelectObject(maskDC, mask);
+        RECT maskRc = {0, 0, 16, 16};
+        FillRect(maskDC, &maskRc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        SelectObject(maskDC, oldMaskBmp);
+        DeleteDC(maskDC);
+    }
+
     HBITMAP old = SelectObject(mem, bmp);
 
     RECT rc = {0, 0, 16, 16};
@@ -743,8 +773,9 @@ static HICON     g_icon;
 static int       g_vol_raw = -1;
 static RecvState g_state   = STATE_OFFLINE;
 static int       g_src     = -1;
+static UINT      g_taskbar_created = 0;
 
-static void update_tray(void)
+static void tray_update_tip(void)
 {
     int dv = (g_state == STATE_ONLINE && g_vol_raw >= 0) ? VOL_RAW_TO_DV(g_vol_raw) : -1;
 
@@ -768,14 +799,37 @@ static void update_tray(void)
             _snprintf_s(g_nid.szTip, sizeof(g_nid.szTip), _TRUNCATE, "Pioneer: %d", dv);
         break;
     }
+}
 
-    if (g_icon)
-        DestroyIcon(g_icon);
+static void update_tray(void)
+{
+    tray_update_tip();
+
+    HICON old_icon = g_icon;
 
     g_icon = create_icon(g_vol_raw, g_state);
     g_nid.hIcon = g_icon;
 
     Shell_NotifyIconA(NIM_MODIFY, &g_nid);
+
+    if (old_icon)
+        DestroyIcon(old_icon);
+}
+
+static void tray_readd_icon(void)
+{
+    tray_update_tip();
+
+    HICON old_icon = g_icon;
+
+    g_icon = create_icon(g_vol_raw, g_state);
+    g_nid.hIcon = g_icon;
+
+    if (!Shell_NotifyIconA(NIM_ADD, &g_nid))
+        Shell_NotifyIconA(NIM_MODIFY, &g_nid);
+
+    if (old_icon)
+        DestroyIcon(old_icon);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1192,9 +1246,26 @@ static void append_src_item(HMENU menu, UINT id, int code, const char *text)
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (g_taskbar_created != 0 && msg == g_taskbar_created) {
+        if (!is_shutting_down()) {
+            OutputDebugStringA("pioneer_tray: TaskbarCreated, re-adding tray icon\n");
+            tray_readd_icon();
+        }
+        return 0;
+    }
+
     switch (msg) {
     case WM_CREATE: {
         WSADATA wsa;
+
+        /* Assign g_hwnd right away. WM_CREATE runs synchronously inside
+           CreateWindowExA, so the assignment in WinMain ("g_hwnd = CreateWindowExA(...)")
+           only happens *after* this handler returns. The reader thread is started
+           below and calls post_state()/post_source(), which check g_hwnd via
+           IsWindow(); without this early assignment there is a window where
+           g_hwnd is still NULL and an early status update from the reader
+           thread would be silently dropped. */
+        g_hwnd = hwnd;
 
         if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
             OutputDebugStringA("pioneer_tray: WSAStartup failed\n");
@@ -1211,6 +1282,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         InitializeCriticalSection(&g_cmd_cs);
         InitializeCriticalSection(&g_shutdown_sock_cs);
 
+        g_taskbar_created = RegisterWindowMessageA("TaskbarCreated");
+
         if (!RegisterHotKey(hwnd, HOTKEY_VOL_DN, 0, 0x7C))
             OutputDebugStringA("Hotkey F13 failed\n");
 
@@ -1225,13 +1298,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         g_nid.uCallbackMessage = WM_TRAY_ICON;
 
-        g_icon = create_icon(-1, STATE_OFFLINE);
-        g_nid.hIcon = g_icon;
-
-        strcpy_s(g_nid.szTip, sizeof(g_nid.szTip), "Pioneer: connecting...");
-
-        if (!Shell_NotifyIconA(NIM_ADD, &g_nid))
-            OutputDebugStringA("Shell_NotifyIconA(NIM_ADD) failed\n");
+        tray_readd_icon();
 
         g_thread = (HANDLE)_beginthreadex(NULL, 0, reader_thread, NULL, 0, NULL);
 
@@ -1466,21 +1533,27 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
         return 0;
     }
 
-    g_hwnd = CreateWindowA(
+    /* g_hwnd is actually assigned inside the WM_CREATE handler (see WndProc),
+       since that runs before CreateWindowExA returns. The assignment here is
+       kept only so we still have the return value to check for failure. */
+    HWND hwndCreated = CreateWindowExA(
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         "ISCPT",
         "",
-        0,
+        WS_POPUP,
         0, 0, 0, 0,
-        HWND_MESSAGE,
+        NULL,
         NULL,
         hInst,
         NULL
     );
 
-    if (!g_hwnd) {
-        OutputDebugStringA("pioneer_tray: CreateWindowA failed\n");
+    if (!hwndCreated) {
+        OutputDebugStringA("pioneer_tray: CreateWindowExA failed\n");
         return 0;
     }
+
+    ShowWindow(hwndCreated, SW_HIDE);
 
     MSG msg;
 
