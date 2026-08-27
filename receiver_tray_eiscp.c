@@ -27,6 +27,7 @@ Protocol: eISCP over TCP
 #define WM_SET_SOURCE (WM_USER + 3)  /* wparam = source code, lparam unused */
 
 #define IDM_EXIT      1001
+#define IDT_LCLICK_POPUP 1  /* timer id: delayed volume-popup display, cancelled by a double left-click */
 #define IDM_POWER     1003
 
 /* Source selection IDs */
@@ -616,6 +617,32 @@ static Color vol_color(int dv)
     return lerp_color((Color){255, 140, 0}, (Color){220, 40, 40}, (dv - 80) / 20.0f);
 }
 
+static HFONT g_icon_font = NULL;
+
+/* The icon's volume-level digits always use the same font. Creating and
+   destroying an HFONT on every redraw (which can happen several times a
+   second while the volume popup is being dragged) is wasted GDI churn for
+   no benefit, since the font never changes. Create it once, lazily, and
+   reuse it; it's freed once in WM_DESTROY. */
+static HFONT get_icon_font(void)
+{
+    if (!g_icon_font) {
+        g_icon_font = CreateFontA(
+            -9, 0, 0, 0,
+            FW_BOLD,
+            FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_SWISS,
+            "Segoe UI"
+        );
+    }
+
+    return g_icon_font;
+}
+
 static HICON create_icon(int vol_raw, RecvState state)
 {
     int dv = (state == STATE_ONLINE && vol_raw >= 0) ? VOL_RAW_TO_DV(vol_raw) : -1;
@@ -719,18 +746,7 @@ static HICON create_icon(int vol_raw, RecvState state)
         else
             _snprintf_s(txt, sizeof(txt), _TRUNCATE, "%d", dv);
 
-        HFONT font = CreateFontA(
-            -9, 0, 0, 0,
-            FW_BOLD,
-            FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_SWISS,
-            "Segoe UI"
-        );
-
+        HFONT font = get_icon_font();
         HFONT oldf = SelectObject(mem, font);
 
         SetBkMode(mem, TRANSPARENT);
@@ -741,7 +757,7 @@ static HICON create_icon(int vol_raw, RecvState state)
         DrawTextA(mem, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         SelectObject(mem, oldf);
-        DeleteObject(font);
+        /* not deleted here: font is cached in g_icon_font and reused */
         break;
     }
     }
@@ -774,6 +790,7 @@ static int       g_vol_raw = -1;
 static RecvState g_state   = STATE_OFFLINE;
 static int       g_src     = -1;
 static UINT      g_taskbar_created = 0;
+static BOOL      g_suppress_next_lclick_up = FALSE; /* see WM_LBUTTONUP/DBLCLK handling in WndProc */
 
 static void tray_update_tip(void)
 {
@@ -1240,6 +1257,62 @@ static void append_src_item(HMENU menu, UINT id, int code, const char *text)
     AppendMenuA(menu, flags, id, text);
 }
 
+static void show_tray_context_menu(HWND hwnd)
+{
+    POINT pt;
+    GetCursorPos(&pt);
+
+    HMENU m = CreatePopupMenu();
+
+    if (g_state == STATE_STANDBY) {
+        AppendMenuA(m, MF_STRING, IDM_POWER, "Power On");
+    } else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING) {
+        AppendMenuA(m, MF_STRING, IDM_POWER, "Standby");
+    } else {
+        AppendMenuA(m, MF_GRAYED | MF_STRING, IDM_POWER, "Power");
+    }
+
+    if (g_state == STATE_ONLINE) {
+        HMENU srcMenu = CreatePopupMenu();
+
+        append_src_item(srcMenu, IDM_SRC_HDMI5, SRC_HDMI5, "HDMI 5");
+        append_src_item(srcMenu, IDM_SRC_HDMI6, SRC_HDMI6, "HDMI 6");
+
+        AppendMenuA(srcMenu, MF_SEPARATOR, 0, NULL);
+
+        append_src_item(srcMenu, IDM_SRC_BD,    SRC_BD,    "BD/DVD");
+        append_src_item(srcMenu, IDM_SRC_CBL,   SRC_CBL,   "CBL/SAT");
+        append_src_item(srcMenu, IDM_SRC_STRM,  SRC_STRM,  "STRM BOX");
+        append_src_item(srcMenu, IDM_SRC_TV,    SRC_TV,    "TV");
+        append_src_item(srcMenu, IDM_SRC_GAME,  SRC_GAME,  "GAME");
+        append_src_item(srcMenu, IDM_SRC_CD,    SRC_CD,    "CD");
+        append_src_item(srcMenu, IDM_SRC_USB,   SRC_USB,   "USB");
+        append_src_item(srcMenu, IDM_SRC_BT,    SRC_BT,    "BLUETOOTH");
+        append_src_item(srcMenu, IDM_SRC_NET,   SRC_NET,   "NET");
+
+        char srcLabel[64];
+        const char *cur = src_name(g_src);
+
+        if (cur)
+            _snprintf_s(srcLabel, sizeof(srcLabel), _TRUNCATE, "Source (%s)", cur);
+        else
+            strcpy_s(srcLabel, sizeof(srcLabel), "Source");
+
+        AppendMenuA(m, MF_POPUP, (UINT_PTR)srcMenu, srcLabel);
+    } else {
+        AppendMenuA(m, MF_GRAYED | MF_STRING, 0, "Source");
+    }
+
+    AppendMenuA(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(m, MF_STRING, IDM_EXIT, "Exit");
+
+    SetForegroundWindow(hwnd);
+
+    TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+
+    DestroyMenu(m);
+}
+
 /* ------------------------------------------------------------------ */
 /* WINDOW PROC                                                        */
 /* ------------------------------------------------------------------ */
@@ -1369,65 +1442,50 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_TRAY_ICON:
         if (LOWORD(lp) == WM_LBUTTONUP) {
-            if (!is_shutting_down() && g_state == STATE_ONLINE)
-                create_volume_popup();
+            /* A double-click delivers DOWN, UP, DBLCLK, UP. Without this
+               check, the second UP (the one right after DBLCLK) would land
+               here too, and since g_state is still ONLINE at that instant
+               (the standby command was only just queued, not yet
+               acknowledged by the receiver), it would re-arm the popup
+               timer -- opening the volume popup ~500ms after the receiver
+               had already been told to go to standby. */
+            if (g_suppress_next_lclick_up) {
+                g_suppress_next_lclick_up = FALSE;
+            } else if (!is_shutting_down() && g_state == STATE_ONLINE) {
+                /* Don't open the volume popup immediately: if this turns out
+                   to be the first click of a double left-click, we want the
+                   double-click (standby) to fire instead. Wait out the
+                   system double-click interval first; a following
+                   WM_LBUTTONDBLCLK cancels this timer so the popup never
+                   opens for a double-click. */
+                SetTimer(hwnd, IDT_LCLICK_POPUP, GetDoubleClickTime(), NULL);
+            }
+        }
+
+        if (LOWORD(lp) == WM_LBUTTONDBLCLK) {
+            g_suppress_next_lclick_up = TRUE;
+            KillTimer(hwnd, IDT_LCLICK_POPUP);
+
+            if (!is_shutting_down()) {
+                if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING)
+                    enqueue_cmd("!1PWR00");
+                else if (g_state == STATE_STANDBY)
+                    enqueue_cmd("!1PWR01");
+            }
         }
 
         if (LOWORD(lp) == WM_RBUTTONUP) {
-            POINT pt;
-            GetCursorPos(&pt);
-
-            HMENU m = CreatePopupMenu();
-
-            if (g_state == STATE_STANDBY) {
-                AppendMenuA(m, MF_STRING, IDM_POWER, "Power On");
-            } else if (g_state == STATE_ONLINE || g_state == STATE_CONNECTING) {
-                AppendMenuA(m, MF_STRING, IDM_POWER, "Standby");
-            } else {
-                AppendMenuA(m, MF_GRAYED | MF_STRING, IDM_POWER, "Power");
-            }
-
-            if (g_state == STATE_ONLINE) {
-                HMENU srcMenu = CreatePopupMenu();
-
-                append_src_item(srcMenu, IDM_SRC_HDMI5, SRC_HDMI5, "HDMI 5");
-                append_src_item(srcMenu, IDM_SRC_HDMI6, SRC_HDMI6, "HDMI 6");
-
-                AppendMenuA(srcMenu, MF_SEPARATOR, 0, NULL);
-
-                append_src_item(srcMenu, IDM_SRC_BD,    SRC_BD,    "BD/DVD");
-                append_src_item(srcMenu, IDM_SRC_CBL,   SRC_CBL,   "CBL/SAT");
-                append_src_item(srcMenu, IDM_SRC_STRM,  SRC_STRM,  "STRM BOX");
-                append_src_item(srcMenu, IDM_SRC_TV,    SRC_TV,    "TV");
-                append_src_item(srcMenu, IDM_SRC_GAME,  SRC_GAME,  "GAME");
-                append_src_item(srcMenu, IDM_SRC_CD,    SRC_CD,    "CD");
-                append_src_item(srcMenu, IDM_SRC_USB,   SRC_USB,   "USB");
-                append_src_item(srcMenu, IDM_SRC_BT,    SRC_BT,    "BLUETOOTH");
-                append_src_item(srcMenu, IDM_SRC_NET,   SRC_NET,   "NET");
-
-                char srcLabel[64];
-                const char *cur = src_name(g_src);
-
-                if (cur)
-                    _snprintf_s(srcLabel, sizeof(srcLabel), _TRUNCATE, "Source (%s)", cur);
-                else
-                    strcpy_s(srcLabel, sizeof(srcLabel), "Source");
-
-                AppendMenuA(m, MF_POPUP, (UINT_PTR)srcMenu, srcLabel);
-            } else {
-                AppendMenuA(m, MF_GRAYED | MF_STRING, 0, "Source");
-            }
-
-            AppendMenuA(m, MF_SEPARATOR, 0, NULL);
-            AppendMenuA(m, MF_STRING, IDM_EXIT, "Exit");
-
-            SetForegroundWindow(hwnd);
-
-            TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
-
-            DestroyMenu(m);
+            show_tray_context_menu(hwnd);
         }
 
+        return 0;
+
+    case WM_TIMER:
+        if (wp == IDT_LCLICK_POPUP) {
+            KillTimer(hwnd, IDT_LCLICK_POPUP);
+            if (!is_shutting_down() && g_state == STATE_ONLINE)
+                create_volume_popup();
+        }
         return 0;
 
     case WM_COMMAND:
@@ -1462,6 +1520,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         begin_shutdown();
 
+        KillTimer(hwnd, IDT_LCLICK_POPUP);
+
         if (g_popup_hwnd) {
             DestroyWindow(g_popup_hwnd);
             g_popup_hwnd = NULL;
@@ -1475,6 +1535,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_icon) {
             DestroyIcon(g_icon);
             g_icon = NULL;
+        }
+
+        if (g_icon_font) {
+            DeleteObject(g_icon_font);
+            g_icon_font = NULL;
         }
 
         SetEvent(g_stop_event);
