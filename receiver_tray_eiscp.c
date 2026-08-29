@@ -343,6 +343,50 @@ static void post_source(int src)
         PostMessageA(g_hwnd, WM_SET_SOURCE, (WPARAM)src, 0);
 }
 
+/* Resync the stream buffer to the next occurrence of the "ISCP" magic,
+   searching starting at byte offset 'start' (bytes before that are known
+   not to be a valid message start and are dropped).
+
+   If no complete 4-byte magic is found in the buffered data, a trailing
+   1-3 byte prefix of "ISCP" is preserved instead of being discarded. Those
+   bytes may be the first bytes of the *next* message on this TCP stream,
+   with the rest still in flight; wiping the whole buffer in that case
+   would silently truncate/corrupt that next message once the remaining
+   bytes arrive on a later recv(). */
+static void stream_resync(unsigned char *stream, int *stream_len, int start)
+{
+    int len = *stream_len;
+    int skip = -1;
+
+    for (int i = start; i <= len - 4; i++) {
+        if (memcmp(stream + i, "ISCP", 4) == 0) {
+            skip = i;
+            break;
+        }
+    }
+
+    if (skip >= 0) {
+        memmove(stream, stream + skip, len - skip);
+        *stream_len = len - skip;
+        return;
+    }
+
+    int keep = 0;
+    int max_check = (len < 3) ? len : 3;
+
+    for (int k = max_check; k > 0; k--) {
+        if (memcmp(stream + len - k, "ISCP", k) == 0) {
+            keep = k;
+            break;
+        }
+    }
+
+    if (keep > 0)
+        memmove(stream, stream + len - keep, keep);
+
+    *stream_len = keep;
+}
+
 static unsigned __stdcall reader_thread(void *arg)
 {
     (void)arg;
@@ -494,22 +538,7 @@ static unsigned __stdcall reader_thread(void *arg)
 
         while (stream_len >= 16) {
             if (memcmp(stream, "ISCP", 4) != 0) {
-                int skip = -1;
-
-                for (int i = 1; i <= stream_len - 4; i++) {
-                    if (memcmp(stream + i, "ISCP", 4) == 0) {
-                        skip = i;
-                        break;
-                    }
-                }
-
-                if (skip < 0) {
-                    stream_len = 0;
-                    break;
-                }
-
-                memmove(stream, stream + skip, stream_len - skip);
-                stream_len -= skip;
+                stream_resync(stream, &stream_len, 1);
                 continue;
             }
 
@@ -520,8 +549,8 @@ static unsigned __stdcall reader_thread(void *arg)
                 (uint32_t)stream[7];
 
             if (hdr_len != 16) {
-                stream_len = 0;
-                break;
+                stream_resync(stream, &stream_len, 1);
+                continue;
             }
 
             uint32_t data_len =
@@ -531,8 +560,8 @@ static unsigned __stdcall reader_thread(void *arg)
                 (uint32_t)stream[11];
 
             if (data_len > 4096) {
-                stream_len = 0;
-                break;
+                stream_resync(stream, &stream_len, 1);
+                continue;
             }
 
             int total = (int)(hdr_len + data_len);
@@ -557,7 +586,15 @@ static unsigned __stdcall reader_thread(void *arg)
                 if (pwr < 0) {
                     post_state(STATE_STANDBY, -1);
                 } else if (pwr > 0) {
-                    post_state(STATE_CONNECTING, -1);
+                    /* TCP connected + power confirmed is enough to consider
+                       the receiver online. Volume/source are independent
+                       pieces of information that arrive shortly after via
+                       MVL/SLI and simply update the already-online state --
+                       they no longer gate the ONLINE transition itself. If
+                       the receiver never sends an MVL reply for some reason,
+                       the app now correctly stays ONLINE (showing "?" for
+                       volume) instead of getting stuck in CONNECTING. */
+                    post_state(STATE_ONLINE, -1);
 
                     if (!send_qstn(sock) || !send_sli_qstn(sock)) {
                         close_reader_sock(&sock);
@@ -870,6 +907,7 @@ static void tray_readd_icon(void)
 
 static HWND      g_popup_hwnd  = NULL;
 static int       g_popup_dv    = 0;
+static int       g_popup_raw   = 0;
 static BOOL      g_popup_drag  = FALSE;
 static ULONGLONG g_popup_last_user = 0;
 static ULONGLONG g_popup_last_send = 0;
@@ -894,14 +932,15 @@ static int y_to_dv(int y)
     return dv;
 }
 
-static void popup_send_vol(int dv, BOOL force)
+static void popup_send_vol_raw(int raw, BOOL force)
 {
     ULONGLONG now = GetTickCount64();
 
     if (!force && g_popup_drag && (now - g_popup_last_send) < POPUP_SEND_INTERVAL_MS)
         return;
 
-    int raw = dv * 2;
+    if (raw < 0)
+        raw = 0;
     if (raw > 200)
         raw = 200;
 
@@ -913,7 +952,12 @@ static void popup_send_vol(int dv, BOOL force)
     g_popup_last_user = now;
 }
 
-static void popup_net_update(int dv)
+static void popup_send_vol(int dv, BOOL force)
+{
+    popup_send_vol_raw(dv * 2, force);
+}
+
+static void popup_net_update(int raw)
 {
     if (!g_popup_hwnd)
         return;
@@ -924,10 +968,13 @@ static void popup_net_update(int dv)
     if (GetTickCount64() - g_popup_last_user < 700)
         return;
 
-    if (dv == g_popup_dv)
+    int dv = VOL_RAW_TO_DV(raw);
+
+    if (dv == g_popup_dv && raw == g_popup_raw)
         return;
 
     g_popup_dv = dv;
+    g_popup_raw = raw;
     InvalidateRect(g_popup_hwnd, NULL, FALSE);
 }
 
@@ -993,6 +1040,7 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 
         int dv = y_to_dv(my);
         g_popup_dv = dv;
+        g_popup_raw = dv * 2;
 
         popup_send_vol(dv, FALSE);
         InvalidateRect(hwnd, NULL, FALSE);
@@ -1009,6 +1057,7 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 
         if (dv != g_popup_dv) {
             g_popup_dv = dv;
+            g_popup_raw = dv * 2;
             popup_send_vol(dv, FALSE);
             InvalidateRect(hwnd, NULL, FALSE);
         }
@@ -1033,17 +1082,23 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         if (steps == 0)
             steps = (delta > 0) ? 1 : -1;
 
-        int new_dv = g_popup_dv + steps;
+        /* One wheel notch = one raw unit = 0.5 dB, same step size as the
+           F13/F14 volume hotkeys. Using g_popup_dv here instead would move
+           the volume by 2 raw units (1 dB) per notch -- twice the hotkey
+           step -- since dv is a coarser 0-100 scale over the 0-200 raw
+           range. */
+        int new_raw = g_popup_raw + steps;
 
-        if (new_dv < 0)
-            new_dv = 0;
+        if (new_raw < 0)
+            new_raw = 0;
 
-        if (new_dv > 100)
-            new_dv = 100;
+        if (new_raw > 200)
+            new_raw = 200;
 
-        if (new_dv != g_popup_dv) {
-            g_popup_dv = new_dv;
-            popup_send_vol(new_dv, TRUE);
+        if (new_raw != g_popup_raw) {
+            g_popup_raw = new_raw;
+            g_popup_dv = VOL_RAW_TO_DV(new_raw);
+            popup_send_vol_raw(new_raw, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
         }
 
@@ -1057,24 +1112,26 @@ static LRESULT CALLBACK VolumePopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         }
 
         if (wp == VK_UP || wp == VK_RIGHT) {
-            int dv = g_popup_dv + 1;
-            if (dv > 100)
-                dv = 100;
+            int raw = g_popup_raw + 1;
+            if (raw > 200)
+                raw = 200;
 
-            g_popup_dv = dv;
-            popup_send_vol(dv, TRUE);
+            g_popup_raw = raw;
+            g_popup_dv = VOL_RAW_TO_DV(raw);
+            popup_send_vol_raw(raw, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
 
             return 0;
         }
 
         if (wp == VK_DOWN || wp == VK_LEFT) {
-            int dv = g_popup_dv - 1;
-            if (dv < 0)
-                dv = 0;
+            int raw = g_popup_raw - 1;
+            if (raw < 0)
+                raw = 0;
 
-            g_popup_dv = dv;
-            popup_send_vol(dv, TRUE);
+            g_popup_raw = raw;
+            g_popup_dv = VOL_RAW_TO_DV(raw);
+            popup_send_vol_raw(raw, TRUE);
             InvalidateRect(hwnd, NULL, FALSE);
 
             return 0;
@@ -1172,6 +1229,7 @@ static void create_volume_popup(void)
     }
 
     g_popup_dv = (g_state == STATE_ONLINE && g_vol_raw >= 0) ? VOL_RAW_TO_DV(g_vol_raw) : 0;
+    g_popup_raw = (g_state == STATE_ONLINE && g_vol_raw >= 0) ? g_vol_raw : 0;
     g_popup_drag = FALSE;
     g_popup_last_user = 0;
     g_popup_last_send = 0;
@@ -1390,17 +1448,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         RecvState new_state = (RecvState)(int)wp;
         int new_vol = (int)lp;
 
-        if (new_state == g_state && (new_state != STATE_ONLINE || new_vol == g_vol_raw))
+        /* new_vol == -1 means "no new volume info in this update", not
+           "volume is unknown" -- e.g. STATE_ONLINE is now posted as soon as
+           power-on is confirmed, before the MVL reply (which carries the
+           actual volume) has arrived. Only treat it as an actual change
+           when a real value is given. */
+        BOOL vol_changed = (new_vol >= 0) && (new_vol != g_vol_raw);
+
+        if (new_state == g_state && (new_state != STATE_ONLINE || !vol_changed))
             return 0;
 
         RecvState old_state = g_state;
 
         g_state = new_state;
 
-        if (new_state == STATE_ONLINE && new_vol >= 0)
+        if (new_vol >= 0)
             g_vol_raw = new_vol;
-        else
+        else if (new_state != STATE_ONLINE)
             g_vol_raw = -1;
+        /* else (ONLINE with no new vol info): keep whatever g_vol_raw
+           already was -- typically -1 right after the CONNECTING->ONLINE
+           transition, since it was cleared on the previous disconnect. */
 
         if (new_state == STATE_OFFLINE ||
             new_state == STATE_STANDBY ||
@@ -1409,7 +1477,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         if (g_state == STATE_ONLINE && g_vol_raw >= 0)
-            popup_net_update(VOL_RAW_TO_DV(g_vol_raw));
+            popup_net_update(g_vol_raw);
 
         update_tray();
 
